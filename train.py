@@ -21,6 +21,7 @@ import time
 import math
 import pickle
 from contextlib import nullcontext
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -33,6 +34,7 @@ from model import GPTConfig, GPT
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'out'
+run_ts = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')  # Set to None to disable timestamped subdirectory
 eval_interval = 2000
 log_interval = 1
 eval_iters = 200
@@ -77,7 +79,8 @@ config_keys = [k for k,v in globals().items() if not k.startswith('_') and isins
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
-
+if run_ts is not None:
+    out_dir = os.path.join(out_dir, run_ts)
 # various inits, derived attributes, I/O setup
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
 if ddp:
@@ -282,8 +285,14 @@ while True:
                     'best_val_loss': best_val_loss,
                     'config': config,
                 }
-                print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                filename=os.path.join(out_dir,f'{iter_num}_ckpt.pt')
+                print(f"saving checkpoint to {filename}")
+                torch.save(checkpoint, filename)
+                symfilename=os.path.join('latest_ckpt.pt')
+                if os.path.exists(symfilename):
+                    os.remove(symfilename)
+                os.symlink(filename,'latest_ckpt.pt') # create a 'latest' symlink
+
     if iter_num == 0 and eval_only:
         break
 
