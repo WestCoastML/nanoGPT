@@ -291,9 +291,10 @@ while True:
                 filename=os.path.join(out_dir,f'{iter_num}_ckpt.pt')
                 print(f"saving checkpoint to {filename}")
                 torch.save(checkpoint, filename)
-                symfilename=os.path.join('latest_ckpt.pt')
-                if os.path.exists(symfilename):
+                symfilename=os.path.join(out_dir,'latest_ckpt.pt')
+                if os.path.islink(symfilename):
                     os.remove(symfilename)
+                print(f"linking {symfilename} to {filename}")
                 os.symlink(filename,symfilename) # create a 'latest' symlink
 
     if iter_num == 0 and eval_only:
