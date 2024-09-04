@@ -27,13 +27,14 @@ import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
+import yaml
 
 from model import GPTConfig, GPT
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
-out_dir = 'out'
+out_dir = 'out/{run_ts}'
 run_ts = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')  # Set to None to disable timestamped subdirectory
 eval_interval = 2000
 log_interval = 1
@@ -79,8 +80,7 @@ config_keys = [k for k,v in globals().items() if not k.startswith('_') and isins
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
-if run_ts is not None:
-    out_dir = os.path.join(out_dir, run_ts)
+out_dir = out_dir.format(**config)
 # various inits, derived attributes, I/O setup
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
 if ddp:
@@ -106,6 +106,9 @@ print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, 'config.yaml'), 'w') as yaml_file:
+        yaml.dump(config, yaml_file, default_flow_style=False)
+
 torch.manual_seed(1337 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
