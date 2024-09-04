@@ -294,7 +294,7 @@ while True:
                 symfilename=os.path.join('latest_ckpt.pt')
                 if os.path.exists(symfilename):
                     os.remove(symfilename)
-                os.symlink(filename,'latest_ckpt.pt') # create a 'latest' symlink
+                os.symlink('latest_ckpt.pt',filename) # create a 'latest' symlink
 
     if iter_num == 0 and eval_only:
         break
