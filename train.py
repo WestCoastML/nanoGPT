@@ -28,6 +28,7 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import yaml
+from torch.nn import functional as F
 
 from model import GPTConfig, GPT
 
@@ -221,6 +222,7 @@ if ddp:
 @torch.no_grad()
 def estimate_loss():
     out = {}
+    losses_pos = []
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
@@ -228,8 +230,13 @@ def estimate_loss():
             X, Y = get_batch(split)
             with ctx:
                 logits, loss = model(X, Y)
+                if split == 'val':
+                    lp=F.cross_entropy(logits.view(-1, logits.size(-1)), Y.view(-1), ignore_index=-1,reduction='none').cpu().numpy()
+                    lp=lp.reshape(batch_size,block_size).mean(axis=0)
+                    losses_pos.append(lp)
             losses[k] = loss.item()
         out[split] = losses.mean()
+    out['val_pos'] = np.mean(np.array(losses_pos),axis=0)
     model.train()
     return out
 
@@ -279,7 +286,7 @@ while True:
             })
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
-            if iter_num > 0:
+            if iter_num >= 0:
                 checkpoint = {
                     'model': raw_model.state_dict(),
                     'optimizer': optimizer.state_dict(),
@@ -296,6 +303,9 @@ while True:
                     os.remove(symfilename)
                 print(f"linking {symfilename} to {filename}")
                 os.symlink(filename,symfilename) # create a 'latest' symlink
+
+        if 'val_pos' in losses:
+            np.save(os.path.join(out_dir, f'{iter_num}_val_pos.npy'), losses['val_pos'])
 
     if iter_num == 0 and eval_only:
         break
