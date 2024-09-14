@@ -292,7 +292,7 @@ while True:
                 filename=os.path.join(out_dir,f'{iter_num}_ckpt.pt')
                 print(f"saving checkpoint to {filename}")
                 torch.save(checkpoint, filename)
-                symfilename=os.path.join(out_dir,'latest_ckpt.pt')
+                symfilename=os.path.join(out_dir,'ckpt.pt')
                 if os.path.islink(symfilename):
                     os.remove(symfilename)
                 print(f"linking {symfilename} to {filename}")
