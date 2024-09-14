@@ -191,6 +191,11 @@ class GPT(nn.Module):
             loss = None
 
         return logits, loss
+    
+    def non_emb_params(self):
+        pl=[p for n, p in self.named_parameters() if 'wte' not in n and 'wpe' not in n and 'lm_head' not in n]
+        return sum(p.numel() for p in pl)
+
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
