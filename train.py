@@ -76,6 +76,7 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
+compute_budget=0.0
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
@@ -218,6 +219,11 @@ if compile:
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 
+compute_per_iter = 6* tokens_per_iter * model.non_emb_params() # forward and backward
+print(f"compute per iteration will be: {compute_per_iter:.2e}")
+if compute_budget:
+    print(f"compute budget is set to {compute_budget:.2e}")
+
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
 def estimate_loss():
@@ -277,6 +283,8 @@ while True:
                 "val/loss": losses['val'],
                 "lr": lr,
                 "mfu": running_mfu*100, # convert to percentage
+                "compute": compute_per_iter*iter_num,
+                "tokens": tokens_per_iter*iter_num,
             })
         if losses['val'] < best_val_loss or always_save_checkpoint or iter_num%save_checkpoint_every == 0:
             best_val_loss = losses['val']
@@ -344,6 +352,10 @@ while True:
 
     # termination conditions
     if iter_num > max_iters:
+        break
+    if compute_budget and compute_per_iter*iter_num > compute_budget:
+        print(f"{compute_per_iter*iter_num=:.2e} {compute_budget=:.2e} {iter_num=} compute budget reached, stopping training")
+        print("reached compute budget, stopping training")
         break
 
 if ddp:
