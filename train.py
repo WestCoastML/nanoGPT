@@ -367,8 +367,8 @@ while True:
     # termination conditions
     if iter_num > max_iters:
         break
+    
     if compute_budget and compute_per_iter*iter_num > compute_budget:
-        print(f"{compute_per_iter*iter_num=:.2e} {compute_budget=:.2e} {iter_num=} compute budget reached, stopping training")
         print("reached compute budget, stopping training")
         break
 
