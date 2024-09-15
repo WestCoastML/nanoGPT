@@ -216,14 +216,16 @@ if compile:
     unoptimized_model = model
     model = torch.compile(model) # requires PyTorch 2.0
 
+compute_per_iter = 6* tokens_per_iter * model.non_emb_params() # forward and backward
+if master_process:
+    print(f"compute per iteration will be: {compute_per_iter:.2e}")
+    if compute_budget:
+        print(f"compute budget is set to {compute_budget:.2e}")
+
 # wrap model into DDP container
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 
-compute_per_iter = 6* tokens_per_iter * model.non_emb_params() # forward and backward
-print(f"compute per iteration will be: {compute_per_iter:.2e}")
-if compute_budget:
-    print(f"compute budget is set to {compute_budget:.2e}")
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
