@@ -42,6 +42,7 @@ eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 save_checkpoint_every = 1000000 # save a checkpoint every this many iterations
+min_save_time = 0 # minimum time between saving checkpoints in seconds
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = False # disabled by default
@@ -268,6 +269,7 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
+last_save_time=0
 start_time=time.time()
 while True:
 
@@ -290,7 +292,8 @@ while True:
                 "compute": compute_per_iter*iter_num,
                 "tokens": tokens_per_iter*iter_num,
             })
-        if losses['val'] < best_val_loss or always_save_checkpoint or iter_num%save_checkpoint_every == 0:
+        if min_save_time<(time.time()-last_save_time) and (
+            losses['val'] < best_val_loss or always_save_checkpoint or iter_num%save_checkpoint_every == 0):
             best_val_loss = losses['val']
             if iter_num > 0:
                 checkpoint = {
@@ -310,6 +313,7 @@ while True:
                     os.remove(symfilename)
                 print(f"linking {symfilename} to {filename}")
                 os.symlink(filename,symfilename) # create a 'latest' symlink
+                last_save_time=time.time()
 
     if iter_num == 0 and eval_only:
         break
