@@ -144,10 +144,6 @@ if os.path.exists(meta_path):
     meta_vocab_size = meta['vocab_size']
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
 
-# model init
-model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
-                  bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
-
 # Calculate diamond-shaped dimensions
 def calculate_diamond_dims(n_layer, base_dim, max_dim, head_dim):
     mid = n_layer // 2
@@ -157,12 +153,25 @@ def calculate_diamond_dims(n_layer, base_dim, max_dim, head_dim):
             target_dim = base_dim + (i * (max_dim - base_dim) // mid)
         else:
             target_dim = max_dim - ((i - mid) * (max_dim - base_dim) // mid)
+        
+        # Round to the nearest multiple of head_dim
         actual_dim = round(target_dim / head_dim) * head_dim
         dims.append(max(base_dim, min(actual_dim, max_dim)))
+    
     return dims
 
 layer_dims = calculate_diamond_dims(n_layer, base_dim, max_dim, head_dim)
 n_heads = [dim // head_dim for dim in layer_dims]
+
+# model init
+model_args = dict(
+    layer_dims=layer_dims,
+    n_heads=n_heads,
+    block_size=block_size,
+    bias=bias,
+    vocab_size=None,
+    dropout=dropout
+)  # start with model_args from command line
 
 if init_from == 'scratch':
     # init a new model from scratch
@@ -171,8 +180,6 @@ if init_from == 'scratch':
     if meta_vocab_size is None:
         print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
     model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
-    model_args['layer_dims'] = layer_dims
-    model_args['n_heads'] = n_heads
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
 elif init_from == 'resume':
@@ -183,7 +190,7 @@ elif init_from == 'resume':
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'layer_dims', 'n_heads']:
+    for k in ['layer_dims', 'n_heads', 'block_size', 'bias', 'vocab_size']:
         model_args[k] = checkpoint_model_args[k]
     # create the model
     gptconf = GPTConfig(**model_args)

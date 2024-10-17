@@ -103,6 +103,7 @@ class Block(nn.Module):
             self.shrink_dim = nn.Linear(layer_dim, next_layer_dim, bias=config.bias)
 
     def forward(self, x):
+        # Add dimensions at the top of the layer
         if self.layer_dim > self.prev_layer_dim:
             extra_dim = self.expand_dim.unsqueeze(0).unsqueeze(0).expand(x.size(0), x.size(1), -1)
             x = torch.cat([x, extra_dim], dim=-1)
@@ -110,13 +111,13 @@ class Block(nn.Module):
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
         
+        # Drop dimensions at the bottom of the layer
         if self.next_layer_dim < self.layer_dim:
             x = self.shrink_dim(x)
         # Alternative way to shrink dimension by dropping extra dimensions
         # If we want to drop extra dimensions, we need to delete nn.Linear self.shrink_dim from this class
         # if self.next_layer_dim < self.layer_dim:
         #     x = x[:, :, :self.next_layer_dim]  # Drop extra dimensions
-        
         return x
 
 @dataclass
@@ -127,8 +128,8 @@ class GPTConfig:
     n_heads: list = None  # List of number of heads for each layer
     dropout: float = 0.0
     bias: bool = True
-class GPT(nn.Module):
 
+class GPT(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.vocab_size is not None
@@ -298,8 +299,9 @@ class GPT(nn.Module):
         # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
         N = self.get_num_params()
         cfg = self.config
-        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd//cfg.n_head, cfg.block_size
-        flops_per_token = 6*N + 12*L*H*Q*T
+        L = len(cfg.layer_dims)
+        T = cfg.block_size
+        flops_per_token = 6*N + 12*sum([cfg.layer_dims[i] * cfg.n_heads[i] * (cfg.layer_dims[i] // cfg.n_heads[i]) * T for i in range(L)])
         flops_per_fwdbwd = flops_per_token * T
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
         # express our flops throughput as ratio of A100 bfloat16 peak flops
