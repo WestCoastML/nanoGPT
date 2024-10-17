@@ -352,15 +352,32 @@ graph TD
         InputToLN2ED --> |Residual| Add2ED
     end
 
+
+    %% Transformer Dimension Shrink2
+    subgraph TransformerBlockShrinkDim2 [Transformer Dim Shrink 2]
+        InputToLN1DD2[Input to Layer Norm 1] --> InputToLN1RDDD2[Reduced Dim]
+        InputToLN1DD2[Input to Layer Norm 1] --> DroppedDimDD2[DroppedDrim]
+        InputToLN1RDDD2 --> LN1DD2[Layer Norm 1]
+        LN1DD2 --> AttentionDD2[Causal Self-Attention]
+        AttentionDD2 --> AttentionOutputDD2[Attention Output]
+        AttentionOutputDD2 --> Add1DD2[Add]
+        InputToLN1RDDD2 --> |Residual| Add1DD2
+
+        Add1DD2 --> InputToLN2DD2[Input to Layer Norm 2]
+        InputToLN2DD2 --> LN2DD2[Layer Norm 2]
+        LN2DD2 --> MLPDD2[MLP]
+        MLPDD2 --> MLPOutputDD2[MLP Output]
+        MLPOutputDD2 --> Add2DD2[Add]
+        InputToLN2DD2 --> |Residual| Add2DD2
+    end
+    
     %% Transformer Dimension Shrink
-    subgraph TransformerBlockShrinkDim [Transformer Dim Shrink]
-        InputToLN1DD[Input to Layer Norm 1] --> InputToLN1RDDD[Reduced Dim]
-        InputToLN1DD[Input to Layer Norm 1] --> DroppedDimDD[DroppedDrim]
-        InputToLN1RDDD --> LN1DD[Layer Norm 1]
+    subgraph TransformerBlockShrinkDim [Transformer Dim Shrink 1]
+        InputToLN1DD[Input to Layer Norm 1] --> LN1DD[Layer Norm 1]
         LN1DD --> AttentionDD[Causal Self-Attention]
         AttentionDD --> AttentionOutputDD[Attention Output]
         AttentionOutputDD --> Add1DD[Add]
-        InputToLN1RDDD --> |Residual| Add1DD
+        InputToLN1DD --> |Residual| Add1DD
 
         Add1DD --> InputToLN2DD[Input to Layer Norm 2]
         InputToLN2DD --> LN2DD[Layer Norm 2]
@@ -368,6 +385,8 @@ graph TD
         MLPDD --> MLPOutputDD[MLP Output]
         MLPOutputDD --> Add2DD[Add]
         InputToLN2DD --> |Residual| Add2DD
+        Add2DD --> BlockOutput[Block Output]
+        Add2DD --> DroppedDims[Dropped Dims]
     end
 
     %% Causal Self-Attention Detail Subgraph
