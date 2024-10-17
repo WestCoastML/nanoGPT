@@ -319,6 +319,29 @@ graph TD
     FinalLN --> LMHead[Language Model Head]
     LMHead --> Output[Output Logits]
 
+    subgraph BlockInputs[Inputs of Block]
+        InputToBlock[Input From Prev Layer]
+        ExtraDim[Extra New Embeddings]
+    end
+    BlockInputs --> |Concatenate| ExpandedInput[Expanded Inputs]
+
+    %% Transformer Dimension Expand
+    subgraph TransformerBlockExpandDim [Transformer Dim Expand]
+        BlockInputs
+        ExpandedInput --> LN1ED[Layer Norm 1]
+        LN1ED --> AttentionED[Causal Self-Attention]
+        AttentionED --> AttentionOutputED[Attention Output]
+        AttentionOutputED --> Add1ED[Add]
+        ExpandedInput --> |Residual| Add1ED
+
+        Add1ED --> InputToLN2ED[Input to Layer Norm 2]
+        InputToLN2ED --> LN2ED[Layer Norm 2]
+        LN2ED --> MLPED[MLP]
+        MLPED --> MLPOutputED[MLP Output]
+        MLPOutputED --> Add2ED[Add]
+        InputToLN2ED --> |Residual| Add2ED
+    end
+
     %% Transformer Blocks Subgraph
     subgraph TransformerBlocks [Transformer Dim Same]
         InputToLN1[Input to Layer Norm 1] --> LN1[Layer Norm 1]
@@ -333,23 +356,6 @@ graph TD
         MLP --> MLPOutput[MLP Output]
         MLPOutput --> Add2[Add]
         InputToLN2 --> |Residual| Add2
-    end
-
-    %% Transformer Dimension Expand
-    subgraph TransformerBlockExpandDim [Transformer Dim Expand]
-        InputToLN1ED[Input to Layer Norm 1] --> LN1ED[Layer Norm 1]
-        AdditionalDim[Additional Dim] --> LN1ED[Layer Norm 1]
-        LN1ED --> AttentionED[Causal Self-Attention]
-        AttentionED --> AttentionOutputED[Attention Output]
-        AttentionOutputED --> Add1ED[Add]
-        InputToLN1ED --> |Residual| Add1ED
-
-        Add1ED --> InputToLN2ED[Input to Layer Norm 2]
-        InputToLN2ED --> LN2ED[Layer Norm 2]
-        LN2ED --> MLPED[MLP]
-        MLPED --> MLPOutputED[MLP Output]
-        MLPOutputED --> Add2ED[Add]
-        InputToLN2ED --> |Residual| Add2ED
     end
 
 
