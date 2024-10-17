@@ -250,14 +250,14 @@ graph TD
     EmbeddingSum --> Dropout
     
     %% Connect Dropout to all three subgraphs
-    Dropout --> TB[TransformerBlocks]
+    Dropout --> TB[Transformer Blocks x N]
 
     TB --> FinalLN[Final Layer Norm]
     FinalLN --> LMHead[Language Model Head]
     LMHead --> Output[Output Logits]
 
     %% Transformer Blocks Subgraph
-    subgraph TransformerBlocks [Transformer Blocks x N]
+    subgraph TransformerBlocks [Transformer Block]
         InputToLN1[Input to Layer Norm 1] --> LN1[Layer Norm 1]
         LN1 --> Attention[Causal Self-Attention]
         Attention --> AttentionOutput[Attention Output]
