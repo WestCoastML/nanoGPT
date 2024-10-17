@@ -18,10 +18,30 @@ gradient_accumulation_steps = 1
 batch_size = 64
 block_size = 256 # context of up to 256 previous characters
 
-# baby GPT model :)
-n_layer = 6
-n_head = 6
-n_embd = 384
+# Diamond-shaped GPT model
+n_layer = 12
+base_dim = 384
+max_dim = 1024
+head_dim = 64  # Dimension per head (constant across all layers)
+
+def calculate_diamond_dims(n_layer, base_dim, max_dim, head_dim):
+    mid = n_layer // 2
+    dims = []
+    for i in range(n_layer):
+        if i <= mid:
+            target_dim = base_dim + (i * (max_dim - base_dim) // mid)
+        else:
+            target_dim = max_dim - ((i - mid) * (max_dim - base_dim) // mid)
+        
+        # Round to the nearest multiple of head_dim
+        actual_dim = round(target_dim / head_dim) * head_dim
+        dims.append(max(base_dim, min(actual_dim, max_dim)))
+    
+    return dims
+
+layer_dims = calculate_diamond_dims(n_layer, base_dim, max_dim, head_dim)
+n_heads = [dim // head_dim for dim in layer_dims]
+
 dropout = 0.2
 
 learning_rate = 1e-3 # with baby networks can afford to go a bit higher

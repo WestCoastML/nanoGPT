@@ -28,60 +28,54 @@ class LayerNorm(nn.Module):
 
 class CausalSelfAttention(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, layer_dim, n_head):
         super().__init__()
-        assert config.n_embd % config.n_head == 0
+        assert layer_dim % n_head == 0
+        self.n_head = n_head
+        self.layer_dim = layer_dim
+        head_dim = layer_dim // n_head
+        self.head_dim = head_dim
+        
         # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        self.c_attn = nn.Linear(layer_dim, 3 * layer_dim, bias=config.bias)
         # output projection
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.c_proj = nn.Linear(layer_dim, layer_dim, bias=config.bias)
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
-        self.n_head = config.n_head
-        self.n_embd = config.n_embd
         self.dropout = config.dropout
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
-        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-        if not self.flash:
-            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
-            # causal mask to ensure that attention is only applied to the left in the input sequence
-            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
-                                        .view(1, 1, config.block_size, config.block_size))
+        self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                    .view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-
-        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        if self.flash:
-            # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
-        else:
-            # manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-            att = F.softmax(att, dim=-1)
-            att = self.attn_dropout(att)
-            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
-
+        q, k, v = self.c_attn(x).split(self.layer_dim, dim=2)
+        k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        
+        # manual implementation of attention
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+        att = F.softmax(att, dim=-1)
+        att = self.attn_dropout(att)
+        y = att @ v
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        
         # output projection
         y = self.resid_dropout(self.c_proj(y))
         return y
 
 class MLP(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, layer_dim):
         super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.gelu    = nn.GELU()
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.c_fc = nn.Linear(layer_dim, 4 * layer_dim, bias=config.bias)
+        self.gelu = nn.GELU()
+        self.c_proj = nn.Linear(4 * layer_dim, layer_dim, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
@@ -92,29 +86,47 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
-
-    def __init__(self, config):
+    def __init__(self, config, prev_layer_dim, layer_dim, next_layer_dim, n_head):
         super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
-        self.mlp = MLP(config)
+        self.ln_1 = LayerNorm(layer_dim, bias=config.bias)
+        self.attn = CausalSelfAttention(config, layer_dim, n_head)
+        self.ln_2 = LayerNorm(layer_dim, bias=config.bias)
+        self.mlp = MLP(config, layer_dim)
+        
+        self.prev_layer_dim = prev_layer_dim
+        self.layer_dim = layer_dim
+        self.next_layer_dim = next_layer_dim
+        
+        if layer_dim > prev_layer_dim:
+            self.expand_dim = nn.Parameter(torch.randn(layer_dim - prev_layer_dim))
+        if next_layer_dim < layer_dim:
+            self.shrink_dim = nn.Linear(layer_dim, next_layer_dim, bias=config.bias)
 
     def forward(self, x):
+        if self.layer_dim > self.prev_layer_dim:
+            extra_dim = self.expand_dim.unsqueeze(0).unsqueeze(0).expand(x.size(0), x.size(1), -1)
+            x = torch.cat([x, extra_dim], dim=-1)
+        
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
+        
+        if self.next_layer_dim < self.layer_dim:
+            x = self.shrink_dim(x)
+        # Alternative way to shrink dimension by dropping extra dimensions
+        # If we want to drop extra dimensions, we need to delete nn.Linear self.shrink_dim from this class
+        # if self.next_layer_dim < self.layer_dim:
+        #     x = x[:, :, :self.next_layer_dim]  # Drop extra dimensions
+        
         return x
 
 @dataclass
 class GPTConfig:
     block_size: int = 1024
-    vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
+    vocab_size: int = 50304
+    layer_dims: list = None  # List of dimensions for each layer
+    n_heads: list = None  # List of number of heads for each layer
     dropout: float = 0.0
-    bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
-
+    bias: bool = True
 class GPT(nn.Module):
 
     def __init__(self, config):
@@ -124,36 +136,30 @@ class GPT(nn.Module):
         self.config = config
 
         self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
+            wte = nn.Embedding(config.vocab_size, config.layer_dims[0]),
+            wpe = nn.Embedding(config.block_size, config.layer_dims[0]),
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            h = nn.ModuleList([Block(config, 
+                                     config.layer_dims[i-1] if i > 0 else config.layer_dims[0], 
+                                     config.layer_dims[i], 
+                                     config.layer_dims[i+1] if i < len(config.layer_dims)-1 else config.layer_dims[-1],
+                                     config.n_heads[i]) 
+                               for i in range(len(config.layer_dims))]),
+            ln_f = LayerNorm(config.layer_dims[-1], bias=config.bias),
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # with weight tying when using torch.compile() some warnings get generated:
-        # "UserWarning: functional_call was passed multiple values for tied weights.
-        # This behavior is deprecated and will be an error in future versions"
-        # not 100% sure what this is, so far seems to be harmless. TODO investigate
-        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+        self.lm_head = nn.Linear(config.layer_dims[-1], config.vocab_size, bias=False)
 
         # init all weights
         self.apply(self._init_weights)
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
-                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * len(self.transformer.h)))
 
         # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
 
     def get_num_params(self, non_embedding=True):
-        """
-        Return the number of parameters in the model.
-        For non-embedding count (default), the position embeddings get subtracted.
-        The token embeddings would too, except due to the parameter sharing these
-        params are actually used as weights in the final layer, so we include them.
-        """
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
             n_params -= self.transformer.wpe.weight.numel()
@@ -171,7 +177,7 @@ class GPT(nn.Module):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        pos = torch.arange(0, t, dtype=torch.long, device=device)
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
