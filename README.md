@@ -225,3 +225,161 @@ For more questions/discussions feel free to stop by **#nanoGPT** on Discord:
 ## acknowledgements
 
 All nanoGPT experiments are powered by GPUs on [Lambda labs](https://lambdalabs.com), my favorite Cloud GPU provider. Thank you Lambda labs for sponsoring nanoGPT!
+
+## Original Model
+
+```mermaid
+graph TD
+    subgraph Model
+        Input[Input Tokens]
+        Embeddings[Embeddings]
+        EmbeddingSum[Embedding Sum]
+        Dropout[Dropout]
+        TB[Transformer Blocks]
+        FinalLN[Final Layer Norm]
+        LMHead[Language Model Head]
+        Output[Output Logits]
+    end
+    %% Main Flow
+    Input[Input Tokens] --> Embeddings
+    subgraph Embeddings
+        WTE[Token Embeddings]
+        WPE[Position Embeddings]
+    end
+    Embeddings --> |Sum| EmbeddingSum[Embedding Sum]
+    EmbeddingSum --> Dropout
+    
+    %% Connect Dropout to all three subgraphs
+    Dropout --> TB[TransformerBlocks]
+
+    TB --> FinalLN[Final Layer Norm]
+    FinalLN --> LMHead[Language Model Head]
+    LMHead --> Output[Output Logits]
+
+    %% Transformer Blocks Subgraph
+    subgraph TransformerBlocks [Transformer Blocks x N]
+        InputToLN1[Input to Layer Norm 1] --> LN1[Layer Norm 1]
+        LN1 --> Attention[Causal Self-Attention]
+        Attention --> AttentionOutput[Attention Output]
+        AttentionOutput --> Add1[Add]
+        Add1 --> |Residual| InputToLN1
+
+        Add1 --> InputToLN2[Input to Layer Norm 2]
+        InputToLN2 --> LN2[Layer Norm 2]
+        LN2 --> MLP[MLP]
+        MLP --> MLPOutput[MLP Output]
+        MLPOutput --> Add2[Add]
+        Add2 --> |Residual| InputToLN2
+    end
+    
+    %% Causal Self-Attention Detail Subgraph
+    subgraph CausalSelfAttention [Causal Self-Attention Detail]
+        QKV[Q, K, V Projections] --> AttentionMech[Attention Mechanism]
+        AttentionMech --> AttentionDropout[Attention Dropout]
+        AttentionDropout --> OutProj[Output Projection]
+    end
+    
+    %% MLP Detail Subgraph
+    subgraph MLPDetail [MLP Detail]
+        FC1[Fully Connected] --> GELU[GELU Activation]
+        GELU --> FC2[Fully Connected]
+        FC2 --> MLPDropout[Dropout]
+    end
+```
+
+---
+
+## New Architecture
+
+```mermaid
+graph TD
+    subgraph Model
+        Input[Input Tokens]
+        Embeddings[Embeddings]
+        EmbeddingSum[Embedding Sum]
+        Dropout[Dropout]
+        TB[Transformer Blocks]
+        FinalLN[Final Layer Norm]
+        LMHead[Language Model Head]
+        Output[Output Logits]
+    end
+    %% Main Flow
+    Input[Input Tokens Dim=D] --> Embeddings
+    subgraph Embeddings
+        WTE[Token Embeddings]
+        WPE[Position Embeddings]
+    end
+    Embeddings --> |Sum| EmbeddingSum[Embedding Sum]
+    EmbeddingSum --> Dropout
+    
+    %% Connect Dropout to all three subgraphs
+    Dropout --> TB[Different Kinds Transformer Blocks x N]
+
+    TB --> FinalLN[Final Layer Norm]
+    FinalLN --> LMHead[Language Model Head]
+    LMHead --> Output[Output Logits]
+
+    %% Transformer Blocks Subgraph
+    subgraph TransformerBlocks [Transformer Dim Same]
+        InputToLN1[Input to Layer Norm 1] --> LN1[Layer Norm 1]
+        LN1 --> Attention[Causal Self-Attention]
+        Attention --> AttentionOutput[Attention Output]
+        AttentionOutput --> Add1[Add]
+        InputToLN1 --> |Residual| Add1
+
+        Add1 --> InputToLN2[Input to Layer Norm 2]
+        InputToLN2 --> LN2[Layer Norm 2]
+        LN2 --> MLP[MLP]
+        MLP --> MLPOutput[MLP Output]
+        MLPOutput --> Add2[Add]
+        InputToLN2 --> |Residual| Add2
+    end
+
+    %% Transformer Dimension Expand
+    subgraph TransformerBlockExpandDim [Transformer Dim Expand]
+        InputToLN1ED[Input to Layer Norm 1] --> LN1ED[Layer Norm 1]
+        AdditionalDim[Additional Dim] --> LN1ED[Layer Norm 1]
+        LN1ED --> AttentionED[Causal Self-Attention]
+        AttentionED --> AttentionOutputED[Attention Output]
+        AttentionOutputED --> Add1ED[Add]
+        InputToLN1ED --> |Residual| Add1ED
+
+        Add1ED --> InputToLN2ED[Input to Layer Norm 2]
+        InputToLN2ED --> LN2ED[Layer Norm 2]
+        LN2ED --> MLPED[MLP]
+        MLPED --> MLPOutputED[MLP Output]
+        MLPOutputED --> Add2ED[Add]
+        InputToLN2ED --> |Residual| Add2ED
+    end
+
+    %% Transformer Dimension Shrink
+    subgraph TransformerBlockShrinkDim [Transformer Dim Shrink]
+        InputToLN1DD[Input to Layer Norm 1] --> InputToLN1RDDD[Reduced Dim]
+        InputToLN1DD[Input to Layer Norm 1] --> DroppedDimDD[DroppedDrim]
+        InputToLN1RDDD --> LN1DD[Layer Norm 1]
+        LN1DD --> AttentionDD[Causal Self-Attention]
+        AttentionDD --> AttentionOutputDD[Attention Output]
+        AttentionOutputDD --> Add1DD[Add]
+        InputToLN1RDDD --> |Residual| Add1DD
+
+        Add1DD --> InputToLN2DD[Input to Layer Norm 2]
+        InputToLN2DD --> LN2DD[Layer Norm 2]
+        LN2DD --> MLPDD[MLP]
+        MLPDD --> MLPOutputDD[MLP Output]
+        MLPOutputDD --> Add2DD[Add]
+        InputToLN2DD --> |Residual| Add2DD
+    end
+
+    %% Causal Self-Attention Detail Subgraph
+    subgraph CausalSelfAttention [Causal Self-Attention Detail]
+        QKV[Q, K, V Projections] --> AttentionMech[Attention Mechanism]
+        AttentionMech --> AttentionDropout[Attention Dropout]
+        AttentionDropout --> OutProj[Output Projection]
+    end
+    
+    %% MLP Detail Subgraph
+    subgraph MLPDetail [MLP Detail]
+        FC1[Fully Connected] --> GELU[GELU Activation]
+        GELU --> FC2[Fully Connected]
+        FC2 --> MLPDropout[Dropout]
+    end
