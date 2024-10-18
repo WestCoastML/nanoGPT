@@ -124,6 +124,7 @@ class Block(nn.Module):
 class GPTConfig:
     block_size: int = 1024
     vocab_size: int = 50304
+    n_layer: int = 12
     layer_dims: list = None  # List of dimensions for each layer
     n_heads: list = None  # List of number of heads for each layer
     dropout: float = 0.0
