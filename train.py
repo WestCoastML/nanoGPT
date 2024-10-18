@@ -54,10 +54,12 @@ n_head = 12
 n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
-# Diamond shape parameters
+# Diamond shape parameters (default)
 base_dim = 384
 max_dim = 1024
 head_dim = 64
+n_layer = 12
+dropout = 0.2
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
@@ -170,7 +172,8 @@ model_args = dict(
     block_size=block_size,
     bias=bias,
     vocab_size=None,
-    dropout=dropout
+    dropout=dropout,
+    n_layer=n_layer,  # Add new layer dimension
 )  # start with model_args from command line
 
 if init_from == 'scratch':
