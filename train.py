@@ -47,7 +47,7 @@ init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = False # disabled by default
 wandb_project = 'owt'
-wandb_run_name = 'gpt2' # 'run' + str(time.time())
+wandb_run_name = '{configname(config)}' # 'run' + str(time.time())
 # data
 dataset = 'openwebtext'
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
@@ -57,6 +57,8 @@ block_size = 1024
 n_layer = 12
 n_head = 12
 n_embd = 768
+upsample=1
+downsample=1
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
@@ -85,6 +87,15 @@ config_keys = [k for k,v in globals().items() if not k.startswith('_') and isins
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 print(yaml.dump(config))
+
+def configname(c):
+    nm=""
+    nm+=f"{c['downsample']}d" if c['downsample']!=1 else ""
+    nm+=f"{c['n_layer']}x{c['n_embd']}" 
+    nm+=f"u{c['upsample']}" if c['upsample']!=1 else ""
+    nm+=f":{configname(c['next_level'].__dict__)}" if c['next_level'] else ""
+    return nm
+
 # -----------------------------------------------------------------------------
 out_dir = out_dir.format(**config)
 # various inits, derived attributes, I/O setup
@@ -263,7 +274,8 @@ def get_lr(it):
 # logging
 if wandb_log and master_process:
     import wandb
-    wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+    run_name = eval(f"f'{wandb_run_name}'")
+    wandb.init(project=wandb_project, name=run_name, config=config)
 
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
