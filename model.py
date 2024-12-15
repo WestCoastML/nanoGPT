@@ -7,9 +7,11 @@ https://github.com/openai/gpt-2/blob/master/src/model.py
 https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
 """
 
+import copy
 import math
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -105,15 +107,35 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln_2(x))
         return x
 
-@dataclass
+class SZAdapter(nn.Module):
+    def __init__(self, in_sz, out_sz):
+        super().__init__()
+        self.in_sz = in_sz
+        self.out_sz = out_sz 
+        if in_sz<out_sz:
+            self.param=nn.Parameter(torch.zeros(1,1,out_sz-in_sz))
+
+    def forward(self, x):
+        if self.in_sz < self.out_sz:
+            p = self.param.repeat(x.shape[0],x.shape[1],1)
+            x = torch.concat((x,p),dim=-1)
+        elif self.in_sz > self.out_sz:
+            x = x[:,:,:self.out_sz]
+        return x
+
+    def __repr__(self):
+        return f"SZAdapter({self.in_sz=},{self.out_sz=})"
+    
+@dataclass 
 class GPTConfig:
-    block_size: int = 1024
-    vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
+    block_size: int = 1024
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    next_level: Optional['GPTConfig'] = None
+    vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
 
 class GPT(nn.Module):
 
@@ -123,11 +145,23 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.config = config
 
+        mlist=[]
+        last_n_embd=None
+        lconfig=config
+        while lconfig:
+            print(f"{last_n_embd=},{lconfig.n_embd=} {lconfig.next_level=}")
+            if lconfig.n_embd!=last_n_embd and last_n_embd is not None:         
+                mlist+=[SZAdapter(last_n_embd,lconfig.n_embd)]
+            last_n_embd=lconfig.n_embd
+            mlist+=[Block(lconfig) for _ in range(lconfig.n_layer)]
+            lconfig=lconfig.next_level
+
+        print(mlist)
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h = nn.ModuleList(mlist),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
