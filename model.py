@@ -106,6 +106,75 @@ class Block(nn.Module):
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
         return x
+class DownSample(nn.Module):
+    def __init__(self, downsample):
+        super().__init__()
+        self.downsample=downsample
+    def forward(self, x):
+        return x[:,::self.downsample,:]
+    def __repr__(self):
+        return f"Downsample({self.downsample=})"
+class UpSample(nn.Module):
+    def __init__(self, upsample):
+        super().__init__()
+        self.upsample=upsample
+    def forward(self, x):
+        return x.repeat_interleave(self.upsample, dim=1)
+    def __repr__(self):
+        return f"Upsample({self.upsample=})"
+class Decimator(nn.Module):
+    '''
+    The Decimator module reduces the sampling rate of the output.
+    To be compatible with existing libraries, we just replicate the output values instead of desampling,
+    but when the downstream can handle it, we will reduct the calculation by desampling.
+    '''
+    def __init__(self, sz, desample=1):
+        super().__init__()
+        self.sz=sz
+        self.predictor=nn.Linear(sz,1)
+        self.predictor_sparsity = 0
+        self.threshold = .5
+        self.alpha = 0.001
+        self.l1_ratio = 0.1
+        self.threshold = 0.5
+        self.desample=desample
+
+
+    def forward(self, x):
+        # desample by a fixed amount on fixed boundaries.
+        x=x[:,::self.desample,:].repeat_interleave(self.desample, dim=1)
+        # pred=self.predictor(x)
+        # pred = torch.sigmoid(pred) 
+
+        # desample the 
+
+        # a measure of predictor sparsity. 0.0 is good, 1.0 is bad
+        # total_elements = pred.numel()
+        # zero_elements = (pred <self.threshold).sum().item()
+        # self.predictor_sparsity = zero_elements / total_elements
+        # self.predictor_sparsity = torch.mean(torch.abs(pred))
+
+        # Elastic Net regularization (L1 + L2)
+        # l1_norm = torch.mean(torch.abs(pred))
+        # l2_norm = torch.mean(pred ** 2)
+        # self.predictor_sparsity = self.alpha * (self.l1_ratio * l1_norm + (1 - self.l1_ratio) * l2_norm)
+
+        # # Apply threshold to get binary values
+        # binary_pred = (pred > self.threshold).float()
+
+        # # Calculate the ratio of ones
+        # ones_ratio = torch.mean(binary_pred)
+        # print(f"Ratio of ones: {ones_ratio.item() * 100:.2f}%")
+
+        # mix previous value with new values based on pred 
+        #prev=x[:,-1,:]
+        # todo use predictor to only update the x when pred is above threshold
+        #x = x * (1.0 - pred)
+        return x
+    
+    def __repr__(self):
+        return f"Decimator({self.predictor.in_features=})"
+
 
 class SZAdapter(nn.Module):
     def __init__(self, in_sz, out_sz):
@@ -136,7 +205,9 @@ class GPTConfig:
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     next_level: Optional['GPTConfig'] = None
     vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
-
+    downsample: int = 1 # down sample the input by this factor
+    upsample: int = 1 # up sample (replicate) the output by this factor
+    
 class GPT(nn.Module):
 
     def __init__(self, config):
@@ -153,7 +224,12 @@ class GPT(nn.Module):
             if lconfig.n_embd!=last_n_embd and last_n_embd is not None:         
                 mlist+=[SZAdapter(last_n_embd,lconfig.n_embd)]
             last_n_embd=lconfig.n_embd
+            if lconfig.downsample != 1:
+                mlist+=[DownSample(lconfig.downsample)]
             mlist+=[Block(lconfig) for _ in range(lconfig.n_layer)]
+            #mlist.append(Decimator(lconfig.n_embd,desample=lconfig.seq_desample))
+            if lconfig.upsample != 1:
+                mlist+=[UpSample(lconfig.upsample)]
             lconfig=lconfig.next_level
 
         print(mlist)
@@ -178,6 +254,8 @@ class GPT(nn.Module):
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
 
+        # todo get predictor threshold from config
+        self.predictor_loss_beta=0.001
         # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
 
@@ -215,10 +293,18 @@ class GPT(nn.Module):
             x = block(x)
         x = self.transformer.ln_f(x)
 
+        # Accumulate predictor_norm from all Decimator layers
+        predictor_loss = 0
+        for layer in self.modules():
+            if isinstance(layer, Decimator):
+                predictor_loss += layer.predictor_sparsity 
+        #print(f"predictor_loss={predictor_loss}")
+
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1) 
+            loss += predictor_loss*self.predictor_loss_beta
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
