@@ -10,3 +10,8 @@ __pycache__/
 input.txt
 env/
 venv/
+nanogpt_file_code.txt
+scripts_for_chatbots_codegen/
+.pytest_cache/
+setup_test_rig.py
+collate_python_files.py

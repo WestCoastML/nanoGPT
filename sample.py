@@ -7,6 +7,7 @@ from contextlib import nullcontext
 import torch
 import tiktoken
 from model import GPTConfig, GPT
+import wandb  # Import wandb
 
 # -----------------------------------------------------------------------------
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
@@ -22,6 +23,14 @@ dtype = 'bfloat16' if torch.cuda.is_bf16_supported() else 'float16' # 'float32' 
 compile = False # use PyTorch 2.0 to compile the model to be faster
 exec(open('configurator.py').read()) # overrides from command line or config file
 # -----------------------------------------------------------------------------
+
+# Initialize wandb if desired
+log_samples = False  # Set to True to enable sample logging
+if log_samples:
+    wandb.init(
+        project='shakespeare-char',
+        name='sampling',
+    )
 
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
@@ -84,5 +93,11 @@ with torch.no_grad():
     with ctx:
         for k in range(num_samples):
             y = model.generate(idx=start_ids, max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k)
-            print(decode(y[0].tolist()))
+            generated_text = decode(y[0].tolist())
+            print(generated_text)
             print('---------------')
+            if log_samples:
+                wandb.log({f"sample_{k}": wandb.Html(f"<pre>{generated_text}</pre>")})
+
+if log_samples:
+    wandb.finish()

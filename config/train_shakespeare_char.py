@@ -18,26 +18,13 @@ gradient_accumulation_steps = 1
 batch_size = 64
 block_size = 256 # context of up to 256 previous characters
 
+from utils.diamond_dim_utils import calculate_diamond_dims
+
 # Diamond-shaped GPT model
 n_layer = 12
 base_dim = 384
 max_dim = 1024
 head_dim = 64  # Dimension per head (constant across all layers)
-
-def calculate_diamond_dims(n_layer, base_dim, max_dim, head_dim):
-    mid = n_layer // 2
-    dims = []
-    for i in range(n_layer):
-        if i <= mid:
-            target_dim = base_dim + (i * (max_dim - base_dim) // mid)
-        else:
-            target_dim = max_dim - ((i - mid) * (max_dim - base_dim) // mid)
-        
-        # Round to the nearest multiple of head_dim
-        actual_dim = round(target_dim / head_dim) * head_dim
-        dims.append(max(base_dim, min(actual_dim, max_dim)))
-    
-    return dims
 
 layer_dims = calculate_diamond_dims(n_layer, base_dim, max_dim, head_dim)
 n_heads = [dim // head_dim for dim in layer_dims]
@@ -55,3 +42,32 @@ warmup_iters = 100 # not super necessary potentially
 # on macbook also add
 # device = 'cpu'  # run on cpu only
 # compile = False # do not torch compile the model
+
+# Optional: Add more hyperparameters or configurations to log
+# config = {
+#     "out_dir": out_dir,
+#     "eval_interval": eval_interval,
+#     "eval_iters": eval_iters,
+#     "log_interval": log_interval,
+#     "always_save_checkpoint": always_save_checkpoint,
+#     "wandb_log": wandb_log,
+#     "wandb_project": wandb_project,
+#     "wandb_run_name": wandb_run_name,
+#     "dataset": dataset,
+#     "gradient_accumulation_steps": gradient_accumulation_steps,
+#     "batch_size": batch_size,
+#     "block_size": block_size,
+#     "n_layer": n_layer,
+#     "base_dim": base_dim,
+#     "max_dim": max_dim,
+#     "head_dim": head_dim,
+#     "n_heads": n_heads,
+#     "dropout": dropout,
+#     "learning_rate": learning_rate,
+#     "max_iters": max_iters,
+#     "lr_decay_iters": lr_decay_iters,
+#     "min_lr": min_lr,
+#     "beta2": beta2,
+#     "warmup_iters": warmup_iters,
+#     # Add any additional parameters you want to log
+# }
