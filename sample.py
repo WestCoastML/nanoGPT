@@ -28,8 +28,15 @@ exec(open('configurator.py').read()) # overrides from command line or config fil
 log_samples = False  # Set to True to enable sample logging
 if log_samples:
     wandb.init(
-        project='shakespeare-char',
+        project='VSLM',
+        entity='wcml',
         name='sampling',
+        config={
+            'init_from': init_from,
+            'out_dir': out_dir,
+            'num_samples': num_samples,
+            'max_new_tokens': max_new_tokens
+        }
     )
 
 torch.manual_seed(seed)

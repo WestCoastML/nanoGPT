@@ -8,7 +8,7 @@ class TestDiamondArchitecture(unittest.TestCase):
         max_dim = 1024
         head_dim = 64
         dims = calculate_diamond_dims(n_layer, base_dim, max_dim, head_dim)
-
+        # symmetrical check
         self.assertEqual(dims, dims[::-1])
 
     def test_divisibility_by_head_dim(self):
@@ -17,9 +17,8 @@ class TestDiamondArchitecture(unittest.TestCase):
         max_dim = 1024
         head_dim = 64
         dims = calculate_diamond_dims(n_layer, base_dim, max_dim, head_dim)
-
         for dim in dims:
-            self.assertEqual(dim % head_dim, 0, f"Dimension {dim} is not divisible by head_dim")
+            self.assertEqual(dim % head_dim, 0, f"Dimension {dim} not divisible by {head_dim}")
 
 if __name__ == '__main__':
     unittest.main()
