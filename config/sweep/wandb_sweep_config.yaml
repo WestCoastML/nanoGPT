@@ -1,0 +1,79 @@
+program: train.py
+method: bayes
+project: VSLM
+entity: wcml
+
+metric:
+  name: eval/val_loss
+  goal: minimize
+
+parameters:
+  # Base config file to use
+  config_path:
+    value: config/train_tinystories.py  # base config to use
+
+  # Architecture parameters
+  model_architecture:
+    value: 'original'  # 'original' for now
+
+  base_dim:
+    values: [384, 512, 640, 768, 896, 1024]  # possible values
+  max_dim:
+    value: 386  # Fixed, since max_dim is not relevant for 'original' architecture
+  head_dim:
+    value: 64   # stays fixed
+  n_layer:
+    values: [6, 8, 12, 16]  # some set of discrete values
+
+  # Training parameters
+  learning_rate:
+    distribution: uniform
+    min: 0.0001  # 1e-4
+    max: 0.001   # 1e-3
+
+  warmup_iters:
+    distribution: int_uniform
+    min: 100
+    max: 2000
+
+  dropout:
+    distribution: uniform   # continuous distribution is now valid
+    min: 0.0
+    max: 0.2
+
+  weight_decay:
+    distribution: uniform
+    min: 0.01
+    max: 0.1
+
+  # Fixed parameters
+  batch_size: 
+    value: 32
+  gradient_accumulation_steps:
+    value: 1
+  max_iters:
+    value: 50000
+  wandb_project:
+    value: "VSLM"
+  wandb_entity:
+    value: "wcml"
+
+early_terminate:
+  type: hyperband
+  min_iter: 1000
+  eta: 2
+  max_iter: 50000
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args_no_hyphens}
+
+# Optional memory limit config:
+# command:
+#   - ${env}
+#   - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb=512
+#   - python
+#   - ${program}
+#   - ${args_no_hyphens}
