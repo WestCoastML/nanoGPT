@@ -107,14 +107,18 @@ class WandBLogger:
         
         wandb.log(log_dict)
 
-    def log_evaluation(self, iter_num: int, train_loss: float, val_loss: float):
+    def log_evaluation(self, iter_num: int, train_loss: float, val_loss: float, compute: float):
         """Log evaluation metrics"""
         eval_dict = {
             "iter": iter_num,
             "eval/train_loss": train_loss,
             "eval/val_loss": val_loss,
             "eval/train_perplexity": np.exp(train_loss),
-            "eval/val_perplexity": np.exp(val_loss)
+            "eval/val_perplexity": np.exp(val_loss),
+            "eval/cumulative_compute": compute,  # Add this line
+            # This creates a separate series specifically for the compute vs test loss plot
+            "compute_test/compute": compute,     # Add this line
+            "compute_test/loss": val_loss        # Add this line
         }
         
         # Add GPU stats for evaluation as well

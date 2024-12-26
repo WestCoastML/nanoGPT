@@ -392,7 +392,7 @@ while True:
         comp = cumulative_compute(iter_num)
 
         if config.get('wandb_log', False) and master_process:
-            logger.log_evaluation(iter_num, losses['train'], losses['val'])
+            logger.log_evaluation(iter_num, losses['train'], losses['val'], comp)
             metrics = {
                 'lr': lr,
                 'mfu': running_mfu,
