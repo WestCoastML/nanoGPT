@@ -22,3 +22,4 @@ ModelArchitecture.ipynb
 wandb_runs.csv
 ignore/
 out_tinystories/
+sweep_*.log

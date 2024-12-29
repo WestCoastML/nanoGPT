@@ -1,3 +1,4 @@
+# For DDP runs (single process across multiple GPUs)
 program: train.py
 method: grid
 project: VSLM
@@ -8,19 +9,17 @@ metric:
   goal: minimize
 
 parameters:
-  # Base config file to use
+  # Base config file
   config_path:
     value: config/train_tinystories.py
-
+    
   # Multi-dataset configuration
   datasets:
     value: '{"openwebtext":0.4,"wikipedia":0.3,"books":0.2,"tinystories":0.1}'
-
-  # Model architecture parameters
+  
   model_architecture:
     value: 'original'
   
-  # Dimension sweep
   base_dim:
     values: [384, 512, 640, 768, 896, 1024]
   
@@ -38,9 +37,9 @@ parameters:
   weight_decay:
     value: 0.01
   batch_size: 
-    value: 32
+    value: 16  # Reduced batch size since we're using DDP
   gradient_accumulation_steps:
-    value: 1
+    value: 2   # Increased to compensate for reduced batch size
   max_iters:
     value: 10000
   wandb_project:
@@ -48,10 +47,4 @@ parameters:
   wandb_entity:
     value: "wcml"
 
-command:
-  - ${env}
-  - torchrun
-  - --standalone
-  - --nproc_per_node=2  # Adjust based on available GPUs
-  - ${program}
-  - ${args_no_hyphens}
+# No command specified as this is handled by run_sweep.sh for DDP mode

@@ -14,11 +14,6 @@ complexity and having to prepend config. to every single variable. If someone
 comes up with a better simple Python solution I am all ears.
 """
 
-"""
-Poor Man's Configurator with proper handling of sweep parameters and config files.
-The code ensures that command-line and sweep parameters take precedence over base config values.
-"""
-
 import sys
 import json
 from ast import literal_eval
@@ -29,11 +24,11 @@ def safe_eval(val):
         # First try JSON parse
         return json.loads(val)
     except json.JSONDecodeError:
-        # Then try Python literal_eval
+        # Then try Python literal_eval for non-JSON but valid Python literals
         try:
             return literal_eval(val)
         except (SyntaxError, ValueError):
-            # Fallback to plain string
+            # Fallback to plain string if neither JSON nor literal_eval works
             return val
 
 # Store sweep/command-line parameters first
@@ -65,11 +60,15 @@ for config_file in config_files:
         config_content = f.read()
         print(config_content)
     exec(config_content, globals())
+    # Store the last config file as config_path
+    if config_file == config_files[-1]:
+        globals()['config_path'] = config_file
 
 # Now apply sweep/command-line parameters to override config file values
 for key, val in sweep_params.items():
     if key == 'config_path':
-        continue  # Skip since we've already processed config files
+        globals()['config_path'] = val  # Ensure config_path is set in globals
+        continue
         
     if key not in globals():
         raise ValueError(f"Unknown config key: {key}")

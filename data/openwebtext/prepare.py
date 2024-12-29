@@ -1,53 +1,45 @@
-# saves the openwebtext dataset to a binary file for training. following was helpful:
-# https://github.com/HazyResearch/flash-attention/blob/main/training/src/datamodules/language_modeling_hf.py
-
+"""
+Prepares the OpenWebText dataset for language model training:
+- Downloads from Hugging Face (requires ~54 GB in .cache)
+- Splits into train/val
+- Tokenizes with GPT-2 BPE
+- Writes out train.bin, val.bin, and meta.pkl
+"""
 import os
 from tqdm import tqdm
 import numpy as np
 import tiktoken
-from datasets import load_dataset # huggingface datasets
+from datasets import load_dataset
+
+import pickle
+import multiprocessing
 
 # number of workers in .map() call
-# good number to use is ~order number of cpu cores // 2
 num_proc = 8
-
+# num_proc = multiprocessing.cpu_count()
 # number of workers in load_dataset() call
-# best number might be different from num_proc above as it also depends on NW speed.
-# it is better than 1 usually though
 num_proc_load_dataset = num_proc
 
 enc = tiktoken.get_encoding("gpt2")
 
 if __name__ == '__main__':
-    # takes 54GB in huggingface .cache dir, about 8M documents (8,013,769)
+    print("Loading OpenWebText dataset. This may be large (~8M documents)...")
     dataset = load_dataset("openwebtext", num_proc=num_proc_load_dataset)
 
-    # owt by default only contains the 'train' split, so create a test split
+    # By default, openwebtext has only a 'train' split.
+    # We'll create a tiny validation split (0.05%)
     split_dataset = dataset["train"].train_test_split(test_size=0.0005, seed=2357, shuffle=True)
-    split_dataset['val'] = split_dataset.pop('test') # rename the test split to val
+    split_dataset['val'] = split_dataset.pop('test')  # rename test split to val
 
-    # this results in:
-    # >>> split_dataset
-    # DatasetDict({
-    #     train: Dataset({
-    #         features: ['text'],
-    #         num_rows: 8009762
-    #     })
-    #     val: Dataset({
-    #         features: ['text'],
-    #         num_rows: 4007
-    #     })
-    # })
-
-    # we now want to tokenize the dataset. first define the encoding function (gpt2 bpe)
+    print("Defining tokenization function...")
     def process(example):
-        ids = enc.encode_ordinary(example['text']) # encode_ordinary ignores any special tokens
-        ids.append(enc.eot_token) # add the end of text token, e.g. 50256 for gpt2 bpe
-        # note: I think eot should be prepended not appended... hmm. it's called "eot" though...
-        out = {'ids': ids, 'len': len(ids)}
-        return out
+        # GPT-2 BPE
+        ids = enc.encode_ordinary(example['text'])
+        # Add end-of-text token
+        ids.append(enc.eot_token)
+        return {'ids': ids, 'len': len(ids)}
 
-    # tokenize the dataset
+    print("Tokenizing splits...")
     tokenized = split_dataset.map(
         process,
         remove_columns=['text'],
@@ -55,27 +47,48 @@ if __name__ == '__main__':
         num_proc=num_proc,
     )
 
-    # concatenate all the ids in each dataset into one large file we can use for training
+    # We'll now concatenate all tokens for each split into a single binary file
+    data_dir = os.path.dirname(__file__)
+
+    # For counting final # of tokens
+    train_token_count = np.sum(tokenized['train']['len'], dtype=np.uint64)
+    val_token_count = np.sum(tokenized['val']['len'], dtype=np.uint64)
+
     for split, dset in tokenized.items():
         arr_len = np.sum(dset['len'], dtype=np.uint64)
-        filename = os.path.join(os.path.dirname(__file__), f'{split}.bin')
-        dtype = np.uint16 # (can do since enc.max_token_value == 50256 is < 2**16)
+        filename = os.path.join(data_dir, f'{split}.bin')
+        dtype = np.uint16  # GPT-2 tokens fit in uint16
         arr = np.memmap(filename, dtype=dtype, mode='w+', shape=(arr_len,))
-        total_batches = 1024
 
+        # We'll write in total_batches shards
+        total_batches = 1024
         idx = 0
+        print(f"\nWriting {split}.bin...")
         for batch_idx in tqdm(range(total_batches), desc=f'writing {filename}'):
-            # Batch together samples for faster write
-            batch = dset.shard(num_shards=total_batches, index=batch_idx, contiguous=True).with_format('numpy')
+            # Each shard is contiguous: we use .shard(...) in the HF dataset
+            batch = dset.shard(
+                num_shards=total_batches, index=batch_idx, contiguous=True
+            ).with_format('numpy')
             arr_batch = np.concatenate(batch['ids'])
-            # Write into mmap
             arr[idx : idx + len(arr_batch)] = arr_batch
             idx += len(arr_batch)
         arr.flush()
+        print(f"Saved {arr_len:,} tokens to {filename}")
 
-    # train.bin is ~17GB, val.bin ~8.5MB
-    # train has ~9B tokens (9,035,582,198)
-    # val has ~4M tokens (4,434,897)
+    # Summaries
+    print(f"\ntrain.bin has {train_token_count:,} tokens")
+    print(f"val.bin has   {val_token_count:,} tokens")
 
-    # to read the bin files later, e.g. with numpy:
-    # m = np.memmap('train.bin', dtype=np.uint16, mode='r')
+    # Save meta information
+    meta = {
+        'vocab_size': enc.max_token_value + 1,       # e.g. 50257
+        'train_tokens': int(train_token_count),
+        'val_tokens': int(val_token_count),
+    }
+    meta_path = os.path.join(data_dir, 'meta.pkl')
+    with open(meta_path, 'wb') as f:
+        pickle.dump(meta, f)
+
+    print(f"\nWrote meta.pkl with vocab_size={meta['vocab_size']}, "
+          f"train_tokens={meta['train_tokens']:,}, val_tokens={meta['val_tokens']:,}.")
+    print("OpenWebText dataset preparation complete!")
