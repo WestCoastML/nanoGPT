@@ -1,4 +1,7 @@
 # For single-GPU runs (one agent per GPU)
+# command_timeout: 24h  # Timeout for each run
+# run_cap: 1  # Only run one configuration at a time (keep it commented out)
+
 program: train.py
 method: grid
 project: VSLM
@@ -23,7 +26,7 @@ parameters:
   base_dim:
     values: [384, 512, 640, 768, 896, 1024]
   
-  # Fixed parameters  
+  # Fixed parameters
   n_layer:
     value: 12
   head_dim:
@@ -47,6 +50,7 @@ parameters:
   wandb_entity:
     value: "wcml"
 
+# Command for single GPU runs - no torchrun needed
 command:
   - ${env}
   - python

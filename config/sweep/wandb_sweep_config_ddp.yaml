@@ -1,4 +1,8 @@
 # For DDP runs (single process across multiple GPUs)
+
+# command_timeout: 24h  # Timeout for each run
+# run_cap: 1  # Only run one configuration at a time (not needed for ddp and gradient_accumulation_steps setup)
+
 program: train.py
 method: grid
 project: VSLM
@@ -47,4 +51,11 @@ parameters:
   wandb_entity:
     value: "wcml"
 
-# No command specified as this is handled by run_sweep.sh for DDP mode
+# Command configuration for DDP
+command:
+  - ${env}
+  - torchrun
+  - --standalone
+  - --nproc_per_node=2  # Number of GPUs to use in DDP mode
+  - ${program}
+  - ${args_no_hyphens}

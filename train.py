@@ -43,6 +43,16 @@ from model import GPTConfig, GPT
 import psutil
 import gc
 import sys
+import datetime
+import logging
+
+# Basic initial logging config - will be enhanced after DDP setup
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
 # default config values
@@ -104,12 +114,12 @@ def process_datasets_config(datasets_config):
         try:
             ds = json.loads(datasets_config)
         except json.JSONDecodeError:
-            print("WARNING: Invalid datasets JSON string. Falling back to single dataset.")
+            logger.warning("Invalid datasets JSON string. Falling back to single dataset.")
             return {}
         
         total_weight = sum(ds.values())
         if not (0.99 <= total_weight <= 1.01):
-            print(f"WARNING: Dataset weights sum to {total_weight}, normalizing...")
+            logger.warning(f"Dataset weights sum to {total_weight}, normalizing...")
             ds = {k: v / total_weight for k, v in ds.items()}
         
         return ds
@@ -148,39 +158,67 @@ def setup_wandb_logging(config, master_process):
     )
 
 def setup_distributed(config):
-    """Setup distributed training environment"""
+    """Setup distributed training environment with improved error handling"""
     ddp = int(os.environ.get('RANK', -1)) != -1
     if ddp:
-        init_process_group(backend=config['backend'])
+        logger.info("Setting up distributed training...")
+        
+        # Set NCCL parameters for better stability
+        os.environ['NCCL_DEBUG'] = 'INFO'
+        os.environ['NCCL_IB_TIMEOUT'] = '23'
+        os.environ['NCCL_SOCKET_TIMEOUT'] = '120'
+        
         ddp_rank = int(os.environ['RANK'])
         ddp_local_rank = int(os.environ['LOCAL_RANK'])
         ddp_world_size = int(os.environ['WORLD_SIZE'])
+        
+        # Initialize process group with increased timeout
+        init_process_group(
+            backend=config['backend'],
+            timeout=datetime.timedelta(minutes=30)
+        )
+        
+        # Set device and ensure GPU cache is empty
         device = f'cuda:{ddp_local_rank}'
         torch.cuda.set_device(device)
+        torch.cuda.empty_cache()
+        
         master_process = (ddp_rank == 0)
         seed_offset = ddp_rank
-        assert config['gradient_accumulation_steps'] % ddp_world_size == 0, \
-            "gradient_accumulation_steps must be divisible by world size"
+        
+        if config['gradient_accumulation_steps'] % ddp_world_size != 0:
+            raise ValueError(
+                f"gradient_accumulation_steps ({config['gradient_accumulation_steps']}) "
+                f"must be divisible by world_size ({ddp_world_size})"
+            )
+        
         config['gradient_accumulation_steps'] //= ddp_world_size
+        
+        # Adjust logging level for non-master processes
+        if not master_process:
+            logging.getLogger().setLevel(logging.WARNING)
+        
     else:
+        ddp_rank = 0
+        ddp_local_rank = 0
         ddp_world_size = 1
         master_process = True
         seed_offset = 0
         device = config['device']
     
-    return ddp, device, master_process, seed_offset, ddp_world_size
+    return ddp, device, master_process, seed_offset, ddp_world_size, ddp_rank, ddp_local_rank
 
 def setup_model_dimensions(config):
     """Setup model dimensions based on architecture"""
     if config['n_dims'] is not None:
-        print("\nDEBUG: Using explicitly provided n_dims")
+        logger.debug("Using explicitly provided n_dims")
         layer_dims = config['n_dims']
         assert len(layer_dims) == config['n_layer'], \
             f"n_dims has {len(layer_dims)} entries, but n_layer={config['n_layer']}"
         n_heads = [d // config['head_dim'] for d in layer_dims]
         use_unet = False
     else:
-        print("\nDEBUG: Calculating dimensions based on model_architecture")
+        logger.debug("Calculating dimensions based on model_architecture")
         if config['model_architecture'] == 'original':
             n_embd = config['base_dim']
             n_head = n_embd // config['head_dim']
@@ -296,11 +334,11 @@ def cleanup_memory():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
-def log_memory_stats(logger, iter_num):
-    """Log memory statistics via wandb.log if logger is active"""
-    if logger is None:
+def log_memory_stats(wandb_logger, iter_num):
+    """Log memory statistics via wandb.log if wandb_logger is active"""
+    if wandb_logger is None:
         return
-    logger.log_memory_per_gpu()
+    wandb_logger.log_memory_per_gpu()
 
 def cumulative_compute(iter_num, num_params, tokens_per_iter):
     """
@@ -310,6 +348,24 @@ def cumulative_compute(iter_num, num_params, tokens_per_iter):
     """
     N = num_params
     return (iter_num * tokens_per_iter * 6 * N)
+
+def setup_ddp_logging():
+    """Setup logging for DDP processes"""
+    if int(os.environ.get('RANK', -1)) != -1:
+        # This is a DDP process
+        rank = int(os.environ['RANK'])
+        local_rank = int(os.environ['LOCAL_RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
+        
+        # Set up logging format to include rank
+        logging.basicConfig(
+            format=f'[Rank {rank}] %(message)s',
+            level=logging.INFO if rank == 0 else logging.WARNING
+        )
+        
+        local_logger = logging.getLogger(__name__)
+        local_logger.info(f"Initializing DDP process: rank={rank}, "
+                          f"local_rank={local_rank}, world_size={world_size}")
 
 def main():
     # Read and process config
@@ -327,7 +383,8 @@ def main():
         'literal_eval': literal_eval,
         'json': json
     })
-    print("Command line arguments:", sys.argv)
+    # Use f-string or similar to avoid the UnboundLocalError
+    logger.info(f"Command line arguments: {sys.argv}")
     exec(open('configurator.py').read(), context)
 
     config = {k: globals()[k] for k in config_keys}
@@ -336,21 +393,46 @@ def main():
     config['datasets'] = process_datasets_config(config.get('datasets', {}))
 
     # Setup distributed training
-    ddp, device, master_process, seed_offset, ddp_world_size = setup_distributed(config)
+    ddp, device_str, master_process, seed_offset, ddp_world_size, ddp_rank, ddp_local_rank = setup_distributed(config)
+
+    # setup_ddp_logging() after DDP is configured
+    setup_ddp_logging()
+    
+    if ddp:
+        # Synchronize random seeds
+        torch.manual_seed(1337 + seed_offset)
+        
+        # Ensure all processes have same config
+        for k, v in config.items():
+            if torch.distributed.is_initialized():
+                # Create tensor on the correct device
+                if torch.distributed.get_rank() == 0:
+                    if isinstance(v, (int, float)):
+                        tensor = torch.tensor([float(v)], device=device_str)
+                    else:
+                        tensor = torch.tensor([0.0], device=device_str)
+                else:
+                    tensor = torch.tensor([0.0], device=device_str)
+                
+                # Broadcast and update config
+                torch.distributed.broadcast(tensor, 0)
+                if torch.distributed.get_rank() != 0:
+                    if isinstance(v, (int, float)):
+                        config[k] = int(tensor.item()) if isinstance(v, int) else tensor.item()
 
     # Print final config if master_process (helps avoid confusion)
     if master_process:
-        print("\n------ Effective Config (after overrides) ------")
+        logger.info("\n------ Effective Config (after overrides) ------")
         for k, v in config.items():
-            print(f"{k} = {v}")
+            logger.info(f"{k} = {v}")
         if config['datasets']:
-            print(f"Note: The single 'dataset' ({config['dataset']}) is overridden by multi-datasets {config['datasets']}")
+            logger.info(f"Note: The single 'dataset' ({config['dataset']}) is overridden by multi-datasets {config['datasets']}")
 
     # Setup model dimensions
-    layer_dims, n_heads, use_unet = setup_model_dimensions(config)
+    layer_dims, n_heads, use_unet_local = setup_model_dimensions(config)
     config['layer_dims'] = layer_dims
     config['n_heads'] = n_heads
-    config['use_unet'] = use_unet
+    config['use_unet'] = use_unet_local
 
     # Calculate tokens per iteration
     tokens_per_iter = (config['gradient_accumulation_steps'] *
@@ -358,7 +440,7 @@ def main():
                        config['batch_size'] *
                        config['block_size'])
     config['tokens_per_iter'] = tokens_per_iter
-    print(f"\ntokens per iteration: {tokens_per_iter:,}")
+    logger.info(f"\ntokens per iteration: {tokens_per_iter:,}")
 
     # Setup directories and random seed
     if master_process:
@@ -368,7 +450,7 @@ def main():
     torch.backends.cudnn.allow_tf32 = True
 
     # Setup dtype and autocast context
-    device_type = 'cuda' if 'cuda' in device else 'cpu'
+    device_type = 'cuda' if 'cuda' in device_str else 'cpu'
     ptdtype = {
         'float32': torch.float32,
         'bfloat16': torch.bfloat16,
@@ -377,10 +459,10 @@ def main():
     ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
     # Setup dataset handler (multi or single dataset)
-    dataset_handler, vocab_size, data_dir = setup_dataset_handler(config, device, seed_offset)
+    dataset_handler, vocab_size, data_dir = setup_dataset_handler(config, device_str, seed_offset)
 
-    # Setup wandb logging
-    logger = setup_wandb_logging(config, master_process)
+    # Setup wandb logging (renamed to avoid scoping collisions)
+    wandb_logger = setup_wandb_logging(config, master_process)
 
     # Initialize model
     model_args = dict(
@@ -397,15 +479,15 @@ def main():
 
     # Model init from scratch/resume/gpt2
     if config['init_from'] == 'scratch':
-        print("Initializing a new model from scratch")
+        logger.info("Initializing a new model from scratch")
         gptconf = GPTConfig(**model_args)
         model = GPT(gptconf)
         iter_num = 0
         best_val_loss = 1e9
     elif config['init_from'] == 'resume':
-        print(f"Resuming training from {config['out_dir']}")
+        logger.info(f"Resuming training from {config['out_dir']}")
         ckpt_path = os.path.join(config['out_dir'], 'ckpt.pt')
-        checkpoint = torch.load(ckpt_path, map_location=device)
+        checkpoint = torch.load(ckpt_path, map_location=device_str)
         gptconf = GPTConfig(**checkpoint['model_args'])
         model = GPT(gptconf)
         state_dict = checkpoint['model']
@@ -417,7 +499,7 @@ def main():
         iter_num = checkpoint['iter_num']
         best_val_loss = checkpoint['best_val_loss']
     elif config['init_from'].startswith('gpt2'):
-        print(f"Initializing from OpenAI GPT-2 weights: {config['init_from']}")
+        logger.info(f"Initializing from OpenAI GPT-2 weights: {config['init_from']}")
         override_args = dict(dropout=config['dropout'])
         model = GPT.from_pretrained(config['init_from'], override_args)
         iter_num = 0
@@ -425,12 +507,42 @@ def main():
     else:
         raise ValueError(f"Unknown init_from: {config['init_from']}")
 
+    # # Find this section in train.py around line 515
+    # if ddp:
+    #     # Verify all processes have same model structure
+    #     for name, param in model.named_parameters():
+    #         if torch.distributed.is_initialized():
+    #             # Make sure param.data is on GPU and create tensor_list on same device
+    #             param_device = param.data.device
+    #             shapes = [torch.zeros_like(param.data, device=param_device) for _ in range(ddp_world_size)]
+    #             torch.distributed.all_gather(shapes, param.data)
+    #             if torch.distributed.get_rank() == 0:
+    #                 for i, shape in enumerate(shapes):
+    #                     if not torch.equal(shape, param.data):
+    #                         raise ValueError(f"Parameter {name} shape mismatch between processes")
+
     # Move model to device
-    model.to(device)
+    model.to(device_str)
+
+    if ddp:
+        # Verify all processes have same model structure
+        for name, param in model.named_parameters():
+            if torch.distributed.is_initialized():
+                # Ensure param is on GPU and create tensor_list on same device
+                if param.device.type != 'cuda':
+                    param.data = param.data.cuda()
+                shapes = [torch.zeros_like(param.data, device=param.device) 
+                        for _ in range(ddp_world_size)]
+                try:
+                    torch.distributed.all_gather(shapes, param.data)
+                except RuntimeError as e:
+                    print(f"Error during all_gather for param {name} on "
+                        f"device {param.device}: {str(e)}")
+                    raise
 
     # Optionally compile (PyTorch 2.0+)
     if config['compile']:
-        print("Compiling the model... (PyTorch 2.0+)")
+        logger.info("Compiling the model... (PyTorch 2.0+)")
         model = torch.compile(model)
 
     # Setup DDP if needed
@@ -440,7 +552,8 @@ def main():
 
     # Setup optimizer
     scaler = torch.amp.GradScaler(enabled=(config['dtype'] == 'float16'))
-    optimizer = model.configure_optimizers(
+    raw_model = model.module if ddp else model
+    optimizer = raw_model.configure_optimizers(
         config['weight_decay'],
         config['learning_rate'],
         (config['beta1'], config['beta2']),
@@ -453,9 +566,9 @@ def main():
         del checkpoint  # free memory
 
     # Log number of parameters
-    num_params = model.module.get_num_params() if ddp else model.get_num_params()
+    num_params = raw_model.get_num_params()
     if master_process:
-        print(f"Number of parameters: {num_params/1e6:.2f}M")
+        logger.info(f"Number of parameters: {num_params/1e6:.2f}M")
         if config.get('wandb_log', False) and wandb.run is not None:
             wandb.run.summary["number_of_parameters"] = num_params
 
@@ -466,7 +579,7 @@ def main():
     running_mfu = -1.0
 
     # Fetch initial batch
-    X, Y = get_batch('train', config, dataset_handler, data_dir, device)
+    X, Y = get_batch('train', config, dataset_handler, data_dir, device_str)
 
     try:
         while True:
@@ -478,23 +591,23 @@ def main():
 
             # Evaluate every eval_interval steps
             if iter_num % config['eval_interval'] == 0 and master_process:
-                losses = estimate_loss(model, config, dataset_handler, data_dir, device, ctx)
-                print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+                losses = estimate_loss(model, config, dataset_handler, data_dir, device_str, ctx)
+                logger.info(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
-                if logger:  # Log evaluation
+                if wandb_logger:  # Log evaluation
                     time_elapsed = time.time() - training_start_time
                     tokens_so_far = iter_num * tokens_per_iter
                     comp = cumulative_compute(iter_num, num_params, tokens_per_iter)
 
-                    logger.log_evaluation(iter_num, losses['train'], losses['val'], comp)
-                    logger.log_scaling_metrics(tokens_so_far, comp, time_elapsed)
-                    logger.log_memory_per_gpu()
+                    wandb_logger.log_evaluation(iter_num, losses['train'], losses['val'], comp)
+                    wandb_logger.log_scaling_metrics(tokens_so_far, comp, time_elapsed)
+                    wandb_logger.log_memory_per_gpu()
 
                 # Save checkpoint if val loss improved or always_save_checkpoint
                 if losses['val'] < best_val_loss or config['always_save_checkpoint']:
                     best_val_loss = losses['val']
                     if iter_num > 0:
-                        checkpoint = {
+                        checkpoint_to_save = {
                             'model': (model.module.state_dict() if ddp
                                       else model.state_dict()),
                             'optimizer': optimizer.state_dict(),
@@ -503,8 +616,8 @@ def main():
                             'best_val_loss': best_val_loss,
                             'config': config,
                         }
-                        print(f"saving checkpoint to {config['out_dir']}")
-                        torch.save(checkpoint, os.path.join(config['out_dir'], 'ckpt.pt'))
+                        logger.info(f"saving checkpoint to {config['out_dir']}")
+                        torch.save(checkpoint_to_save, os.path.join(config['out_dir'], 'ckpt.pt'))
 
             # Gradient accumulation steps
             for micro_step in range(config['gradient_accumulation_steps']):
@@ -520,7 +633,7 @@ def main():
                     loss_val = loss_val / config['gradient_accumulation_steps']
 
                 # async prefetch next batch
-                X, Y = get_batch('train', config, dataset_handler, data_dir, device)
+                X, Y = get_batch('train', config, dataset_handler, data_dir, device_str)
 
                 # backward pass
                 scaler.scale(loss_val).backward()
@@ -543,29 +656,34 @@ def main():
             if iter_num % config['log_interval'] == 0 and master_process:
                 lossf = loss_val.item() * config['gradient_accumulation_steps']
                 if local_iter_num >= 5:
-                    mfu = model.estimate_mfu(
-                        config['batch_size'] * config['gradient_accumulation_steps'],
-                        dt
-                    )
+                    if ddp:
+                        mfu = raw_model.estimate_mfu(
+                            config['batch_size'] * config['gradient_accumulation_steps'],
+                            dt
+                        )
+                    else:
+                        mfu = model.estimate_mfu(
+                            config['batch_size'] * config['gradient_accumulation_steps'],
+                            dt
+                        )
                     running_mfu = (mfu if running_mfu < 0
                                    else 0.9 * running_mfu + 0.1 * mfu)
-                print(f"iter {iter_num}: loss {lossf:.4f}, "
-                      f"time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+                logger.info(f"iter {iter_num}: loss {lossf:.4f}, "
+                            f"time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
 
-                if logger:
+                if wandb_logger:
                     time_elapsed = time.time() - training_start_time
                     tokens_so_far = iter_num * tokens_per_iter
                     comp = cumulative_compute(iter_num, num_params, tokens_per_iter)
 
-                    logger.log_training_step(iter_num, {
+                    wandb_logger.log_training_step(iter_num, {
                         'loss': lossf,
                         'lr': lr,
                         'mfu': running_mfu,
                         'iter_time_ms': dt * 1000,
                     })
                     
-                    logger.log_scaling_metrics(tokens_so_far, comp, time_elapsed)
-
+                    wandb_logger.log_scaling_metrics(tokens_so_far, comp, time_elapsed)
 
             iter_num += 1
             local_iter_num += 1
@@ -578,19 +696,23 @@ def main():
             if iter_num % 1000 == 0:
                 cleanup_memory()
 
-    except KeyboardInterrupt:
-        print("Caught KeyboardInterrupt, stopping training...")
+    except Exception as e:
+        if ddp:
+            logger.error(f"[Rank {ddp_rank}] Error occurred: {str(e)}")
+            # Ensure clean process group shutdown
+            destroy_process_group()
+        raise e
 
     finally:
         # Cleanup
         if dataset_handler is not None:
-            print("Cleaning up dataset handler...")
+            logger.info("Cleaning up dataset handler...")
             dataset_handler.cleanup()
         if ddp:
             destroy_process_group()
-        if logger:
-            logger.finish()
+        if wandb_logger:
+            logger.info("Finishing wandb logging...")
+            wandb_logger.finish()
 
 if __name__ == '__main__':
     main()
-

@@ -44,27 +44,29 @@ done
 # Create runs directory if it doesn't exist
 mkdir -p "$PROJECT_ROOT/runs/sweep_pids"
 
-# Initialize the sweep and capture the sweep ID
-TEMP_OUTPUT=$(mktemp)
-
 if [ $USE_DDP -eq 1 ]; then
-    echo "Initializing DDP sweep with command:"
-    echo "wandb sweep config/sweep/wandb_sweep_config_ddp.yaml"
-    wandb sweep config/sweep/wandb_sweep_config_ddp.yaml 2>&1 | tee "$TEMP_OUTPUT"
+    echo "Creating temporary sweep config with $NUM_GPUS GPUs..."
+    # Create a temporary config file with the correct number of GPUs
+    TMP_CONFIG=$(mktemp)
+    sed "s/--nproc_per_node=[0-9]*/--nproc_per_node=$NUM_GPUS/" \
+        config/sweep/wandb_sweep_config_ddp.yaml > "$TMP_CONFIG"
+    
+    echo "Initializing DDP sweep with modified config..."
+    SWEEP_OUTPUT=$(wandb sweep "$TMP_CONFIG" 2>&1)
+    rm "$TMP_CONFIG"
 else
-    echo "Initializing single-GPU sweep with command:"
-    echo "wandb sweep config/sweep/wandb_sweep_config_single.yaml"
-    wandb sweep config/sweep/wandb_sweep_config_single.yaml 2>&1 | tee "$TEMP_OUTPUT"
+    echo "Initializing single-GPU sweep..."
+    SWEEP_OUTPUT=$(wandb sweep config/sweep/wandb_sweep_config_single.yaml 2>&1)
 fi
 
-SWEEP_ID=$(grep "wandb: Run sweep agent with:" "$TEMP_OUTPUT" \
-    | awk '{print $NF}' \
-    | awk -F'/' '{print $NF}')
+# Extract sweep ID
+SWEEP_ID=$(echo "$SWEEP_OUTPUT" | grep "wandb: Run sweep agent with:" | \
+           awk '{print $NF}' | awk -F'/' '{print $NF}')
 
 if [ -z "$SWEEP_ID" ]; then
     echo "Failed to get sweep ID."
-    echo "Full temp output:"
-    cat "$TEMP_OUTPUT"
+    echo "Full sweep output:"
+    echo "$SWEEP_OUTPUT"
     exit 1
 fi
 
@@ -72,28 +74,16 @@ echo "Successfully captured sweep ID: $SWEEP_ID"
 
 if [ $USE_DDP -eq 1 ]; then
     echo "Running DDP sweep across $NUM_GPUS GPUs..."
-    # Create comma-separated list of GPU indices
-    GPU_LIST=$(seq -s, 0 $((NUM_GPUS-1)))
-    
-    # Print full command
-    echo "Launching command:"
-    echo "WANDB_AGENT_DISABLE_FLAPPING=true CUDA_VISIBLE_DEVICES=$GPU_LIST wandb agent wcml/VSLM/$SWEEP_ID"
-    
-    # Launch single DDP process that uses multiple GPUs
-    WANDB_AGENT_DISABLE_FLAPPING=true CUDA_VISIBLE_DEVICES=$GPU_LIST \
-    wandb agent --count 1 wcml/VSLM/$SWEEP_ID &
-    
-    # Store the PID
+    # Run wandb agent directly - torchrun is configured in the sweep config
+    WANDB_AGENT_DISABLE_FLAPPING=true wandb agent wcml/VSLM/$SWEEP_ID &
     echo $! > "$PROJECT_ROOT/runs/sweep_pids/agent_ddp.pid"
     echo "Started DDP sweep agent. To stop it, run: ./scripts/sweep/stop_sweep.sh"
 else
     echo "Running individual agents on $NUM_GPUS GPUs..."
     # Start separate agent on each GPU
     for gpu in $(seq 0 $((NUM_GPUS-1))); do
-        # Print full command for each GPU
-        echo "Starting agent on GPU $gpu with command:"
-        echo "CUDA_VISIBLE_DEVICES=$gpu wandb agent wcml/VSLM/$SWEEP_ID"
-        CUDA_VISIBLE_DEVICES=$gpu wandb agent wcml/VSLM/$SWEEP_ID &
+        # Add unique run_dir for each agent to prevent conflicts
+        CUDA_VISIBLE_DEVICES=$gpu WANDB_RUN_DIR="./runs/agent_${gpu}" wandb agent wcml/VSLM/$SWEEP_ID &
         echo $! > "$PROJECT_ROOT/runs/sweep_pids/agent_gpu${gpu}.pid"
     done
     echo "Started agents on $NUM_GPUS GPUs. To stop them, run: ./scripts/sweep/stop_sweep.sh"
