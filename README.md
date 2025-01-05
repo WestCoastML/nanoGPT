@@ -226,6 +226,72 @@ For more questions/discussions feel free to stop by **#nanoGPT** on Discord:
 
 All nanoGPT experiments are powered by GPUs on [Lambda labs](https://lambdalabs.com), my favorite Cloud GPU provider. Thank you Lambda labs for sponsoring nanoGPT!
 
+## Sweep Management and Run Continuation
+
+### Running Sweeps
+
+1. Single GPU Mode (multiple agents):
+```bash
+# Run on 5 GPUs independently
+./scripts/sweep/run_sweep.sh --num-gpus 5
+```
+
+2. DDP Mode:
+```bash
+# Run with DDP on 4 GPUs
+./scripts/sweep/run_sweep.sh --ddp --num-gpus 4
+```
+
+3. Resume a sweep:
+```bash
+# Resume using sweep ID
+./scripts/sweep/run_sweep.sh --resume abc123xyz --num-gpus 4
+```
+
+### Continuing Individual Runs
+
+You can continue specific runs with modified parameters:
+
+1. Basic continuation:
+```bash
+python -m utils.continue_run abc123xyz --max-iters 20000 --gpu 0
+```
+
+2. Continue with multiple parameter updates:
+```bash
+python -m utils.continue_run abc123xyz --config configs/run_updates.json --gpu 0
+```
+
+3. Continue with DDP:
+```bash
+python -m utils.continue_run abc123xyz --ddp --gpus 0,1,2,3 \
+    --config configs/ddp_run_updates.json
+```
+
+### Output Directory Structure
+
+```
+sweep_outputs/               # Base directory for sweep runs
+    run_[wandb_run_id_1]/   # Individual run directory
+        config.json         # Original configuration
+        config_continuation.json  # Config for continued run
+        ckpt.pt            # Latest checkpoint
+```
+
+### Testing
+
+Quick test suite:
+```bash
+# Run all tests
+pytest tests/
+
+# Run specific test categories
+pytest tests/test_sweep_management.py
+pytest tests/test_run_continuation.py
+```
+
+See `tests/` directory for more test examples and utilities.
+
 ## Original Model
 
 ```mermaid

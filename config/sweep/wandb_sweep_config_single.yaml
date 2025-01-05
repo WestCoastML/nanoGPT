@@ -12,11 +12,13 @@ metric:
   goal: minimize
 
 parameters:
-  # Base config file
+  # Base config and output structure
   config_path:
     value: config/train_tinystories.py
+  out_dir:
+    value: runs/sweeps/${sweep_id}  # Dynamic sweep directory
     
-  # Multi-dataset configuration
+  # Rest of parameters remain the same
   datasets:
     value: '{"openwebtext":0.4,"wikipedia":0.3,"books":0.2,"tinystories":0.1}'
   
@@ -50,9 +52,10 @@ parameters:
   wandb_entity:
     value: "wcml"
 
-# Command for single GPU runs - no torchrun needed
+# Command for single GPU runs
 command:
   - ${env}
+  - WANDB_SWEEP_ID=${sweep_id}  # Pass sweep ID to train.py
   - python
   - ${program}
   - ${args_no_hyphens}

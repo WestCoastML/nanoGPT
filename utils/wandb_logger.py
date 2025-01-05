@@ -80,8 +80,8 @@ class WandBLogger:
         else:
             return [
                 self.config.get('model_architecture', 'original'),
-                f"dims_{self.config.layer_dims[-1]}",
-                f"layers_{self.config.n_layer}",
+                f"dims_{self.config['layer_dims'][-1]}" if 'layer_dims' in self.config else "dims_unknown",
+                f"layers_{self.config['n_layer']}" if 'n_layer' in self.config else "layers_unknown",
                 self.config.get('shape_variant', 'none')
             ]
 

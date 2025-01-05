@@ -13,9 +13,11 @@ metric:
   goal: minimize
 
 parameters:
-  # Base config file
+  # Base config and output structure
   config_path:
     value: config/train_tinystories.py
+  out_dir:
+    value: runs/sweeps/${sweep_id}  # Dynamic sweep directory
     
   # Multi-dataset configuration
   datasets:
@@ -54,8 +56,9 @@ parameters:
 # Command configuration for DDP
 command:
   - ${env}
+  - WANDB_SWEEP_ID=${sweep_id}  # Pass sweep ID to train.py
   - torchrun
   - --standalone
-  - --nproc_per_node=2  # Number of GPUs to use in DDP mode
+  - --nproc_per_node=${num_gpus}
   - ${program}
   - ${args_no_hyphens}

@@ -71,8 +71,8 @@ for key, val in sweep_params.items():
         continue
         
     if key not in globals():
-        raise ValueError(f"Unknown config key: {key}")
-    
+        raise ValueError(f"Unknown config key: {key}. Available keys: {sorted(globals().keys())}")
+
     # Handle type conversion
     original_val = globals()[key]
     
