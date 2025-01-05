@@ -1,4 +1,3 @@
-
 # nanoGPT
 
 ![nanoGPT](assets/nanogpt.jpg)
@@ -228,7 +227,7 @@ All nanoGPT experiments are powered by GPUs on [Lambda labs](https://lambdalabs.
 
 ## Sweep Management and Run Continuation
 
-### Running Sweeps
+### 1. Running Sweeps
 
 1. Single GPU Mode (multiple agents):
 ```bash
@@ -236,37 +235,44 @@ All nanoGPT experiments are powered by GPUs on [Lambda labs](https://lambdalabs.
 ./scripts/sweep/run_sweep.sh --num-gpus 5
 ```
 
-2. DDP Mode:
+2. DDP Mode (single agent controlling multiple GPUs):
 ```bash
 # Run with DDP on 4 GPUs
 ./scripts/sweep/run_sweep.sh --ddp --num-gpus 4
 ```
 
-3. Resume a sweep:
+3. Resume a sweep (pickup same sweep ID, launch new agents or continue from the queue):
 ```bash
 # Resume using sweep ID
 ./scripts/sweep/run_sweep.sh --resume abc123xyz --num-gpus 4
 ```
 
-### Continuing Individual Runs
+> Note: Resuming a sweep here means that wandb will queue or continue new runs for the same sweep ID. If you want to continue an individual run from that sweep, see below.
 
-You can continue specific runs with modified parameters:
+### 2. Continuing Individual Runs
 
-1. Basic continuation:
+You can continue specific runs with modified parameters, reusing the same wandb run ID for seamless continuation of logs. Suppose you have a run directory like runs/sweeps/<SWEEP_ID>/run_<RUN_ID> or a single-run directory with run_<RUN_ID>. Pass <RUN_ID> to utils.continue_run.
+
+1. Basic continuation (single GPU):
 ```bash
-python -m utils.continue_run abc123xyz --max-iters 20000 --gpu 0
+python -m utils.continue_run --run_id abc123xyz --max-iters 20000 --gpus 0
 ```
 
-2. Continue with multiple parameter updates:
+2. Continue with multiple parameter updates (via JSON config):
 ```bash
-python -m utils.continue_run abc123xyz --config configs/run_updates.json --gpu 0
+python -m utils.continue_run --run_id abc123xyz \
+    --config configs/run_updates.json \
+    --gpus 0
 ```
 
-3. Continue with DDP:
+3. Continue with DDP across multiple GPUs:
 ```bash
-python -m utils.continue_run abc123xyz --ddp --gpus 0,1,2,3 \
+python -m utils.continue_run --run_id abc123xyz \
+    --ddp --gpus 0,1,2,3 \
     --config configs/ddp_run_updates.json
 ```
+
+> Tip: You can keep repeating this process to further extend training. Each time, the same wandb run ID will unify your logs, and the code will load the last saved checkpoint.
 
 ### Output Directory Structure
 
@@ -278,7 +284,9 @@ sweep_outputs/               # Base directory for sweep runs
         ckpt.pt            # Latest checkpoint
 ```
 
-### Testing
+> **Note**: If you kill the sweep with `./scripts/sweep/stop_sweep.sh`, you can still individually continue any partially finished run with the commands above. The run directory's checkpoint ensures the same model state is loaded, and setting `WANDB_RUN_ID` internally unifies the run logs on wandb.
+
+### 3. Testing
 
 Quick test suite:
 ```bash
