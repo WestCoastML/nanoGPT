@@ -1,0 +1,9 @@
+defaults:
+  - _self_
+
+# For multi-dataset usage, store them under a top-level `datasets`
+datasets:
+  openwebtext: 0.4
+  wikipedia: 0.3
+  books: 0.2
+  tinystories: 0.1

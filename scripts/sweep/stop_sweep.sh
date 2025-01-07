@@ -1,28 +1,48 @@
 #!/bin/bash
 
-# ./scripts/sweep/stop_sweep.sh
+set -euo pipefail
 
-# Get the directory where the script is located
+# Helper functions
+log() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"
+}
+
+# Setup directories
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-# Get the project root directory
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/../.." &> /dev/null && pwd )"
 
-# Kill DDP agent if it exists
-if [ -f "$PROJECT_ROOT/runs/sweep_pids/agent_ddp.pid" ]; then
-    pid=$(cat "$PROJECT_ROOT/runs/sweep_pids/agent_ddp.pid")
-    echo "Stopping DDP agent with PID $pid"
-    kill $pid 2>/dev/null
-    rm "$PROJECT_ROOT/runs/sweep_pids/agent_ddp.pid"
+# First, try graceful shutdown
+log "Attempting graceful shutdown of processes..."
+
+# Stop wandb agents
+if pgrep -f "wandb agent" > /dev/null; then
+    log "Stopping wandb agents..."
+    pkill -TERM -f "wandb agent"
+    sleep 5  # Give processes time to cleanup
 fi
 
-# Kill single-GPU agents if they exist
-for pid_file in "$PROJECT_ROOT/runs/sweep_pids"/agent_gpu*.pid; do
-    if [ -f "$pid_file" ]; then
-        pid=$(cat "$pid_file")
-        echo "Stopping agent with PID $pid"
-        kill $pid 2>/dev/null
-        rm "$pid_file"
+# Stop training processes
+if pgrep -f "python.*train.py" > /dev/null; then
+    log "Stopping training processes..."
+    pkill -TERM -f "python.*train.py"
+    sleep 5
+fi
+
+# Force kill if processes still exist
+log "Checking for remaining processes..."
+
+for pattern in "wandb agent" "python.*train.py" "torchrun"; do
+    if pgrep -f "$pattern" > /dev/null; then
+        log "Force killing $pattern processes..."
+        pkill -9 -f "$pattern"
     fi
 done
 
-echo "All agents stopped"
+# Clean up PID files
+log "Cleaning up PID files..."
+rm -f "$PROJECT_ROOT/runs/sweep_pids"/*.pid
+
+# Update sweep status files if they exist
+find "$PROJECT_ROOT/runs/sweeps" -name "status" -type f -exec sh -c 'echo "stopped" > "$1"' sh {} \;
+
+log "Sweep shutdown completed"

@@ -1,8 +1,5 @@
 # For DDP runs (single process across multiple GPUs)
 
-# command_timeout: 24h  # Timeout for each run
-# run_cap: 1  # Only run one configuration at a time (not needed for ddp and gradient_accumulation_steps setup)
-
 program: train.py
 method: grid
 project: VSLM
@@ -13,27 +10,22 @@ metric:
   goal: minimize
 
 parameters:
-  # Base config and output structure
-  config_path:
-    value: config/train_tinystories.py
-  out_dir:
-    value: runs/sweeps/${sweep_id}  # Dynamic sweep directory
-    
-  # Multi-dataset configuration
-  datasets:
-    value: '{"openwebtext":0.4,"wikipedia":0.3,"books":0.2,"tinystories":0.1}'
-  
-  model_architecture:
-    value: 'original'
-  
+  # Base dimensions sweep
   base_dim:
     values: [384, 512, 640, 768, 896, 1024]
-  
-  # Fixed parameters
+
+  wandb_log:
+    value: true
+
+  # Fixed architecture parameters  
+  model_architecture:
+    value: 'original'
   n_layer:
     value: 12
   head_dim:
     value: 64
+
+  # Training parameters
   learning_rate:
     value: 0.0003
   warmup_iters:
@@ -42,21 +34,27 @@ parameters:
     value: 0.1
   weight_decay:
     value: 0.01
-  batch_size: 
-    value: 16  # Reduced batch size since we're using DDP
+  batch_size:
+    value: 16
   gradient_accumulation_steps:
-    value: 2   # Increased to compensate for reduced batch size
+    value: 2
   max_iters:
     value: 10000
+
+  # Wandb settings
   wandb_project:
     value: "VSLM"
   wandb_entity:
     value: "wcml"
 
+  # Output directory with sweep ID
+  out_dir:
+    value: 'runs/sweeps/\@\@SWEEPID\@\@'
+
 # Command configuration for DDP
 command:
   - ${env}
-  - WANDB_SWEEP_ID=${sweep_id}  # Pass sweep ID to train.py
+  - WANDB_SWEEP_ID=${sweep_id}
   - torchrun
   - --standalone
   - --nproc_per_node=${num_gpus}

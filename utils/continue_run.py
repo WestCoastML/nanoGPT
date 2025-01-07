@@ -53,6 +53,15 @@ def load_and_validate_config(original_config: Dict[str, Any],
     # Validate compatibility between old and new configs
     if not validate_config_compatibility(config, new_config):
         raise ValueError("New configuration is not compatible with original checkpoint configuration")
+        
+    # Handle datasets configuration
+    if 'datasets' in new_config:
+        if isinstance(new_config['datasets'], str):
+            try:
+                new_config['datasets'] = json.loads(new_config['datasets'])
+            except json.JSONDecodeError:
+                logger.warning("Invalid datasets JSON string in new config, keeping original datasets")
+                new_config['datasets'] = config.get('datasets', {"openwebtext": 1.0})
     
     # Get default config for additional validation
     default_config = get_default_config()
@@ -115,8 +124,10 @@ def create_command(config: Dict[str, Any],
     for k, v in config.items():
         if isinstance(v, (list, dict)):
             cmd.append(f"--{k}='{json.dumps(v)}'")
+            if k == 'datasets':
+                logger.info(f"Using datasets configuration: {v}")
         else:
-            cmd.append(f"--{k}={v}")
+            cmd.append(f("--{k}={v}")
             
     return cmd, env
 
@@ -262,6 +273,13 @@ def main():
         'resume_run_id': args.run_id
     })
     
+    # Potential fix: if you want the run to see ddp or not, we can do:
+    if args.ddp:
+        config["ddp"] = True
+    else:
+        config["ddp"] = False
+    # This ensures train.py can see cfg.ddp
+
     # Create command and environment
     cmd, env = create_command(config, str(run_dir), args.ddp, args.gpus)
     

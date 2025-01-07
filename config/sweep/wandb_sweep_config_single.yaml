@@ -13,26 +13,29 @@ metric:
 
 parameters:
   # Base config and output structure
-  config_path:
-    value: config/train_tinystories.py
   out_dir:
-    value: runs/sweeps/${sweep_id}  # Dynamic sweep directory
+    value: 'runs/sweeps/\@\@SWEEPID\@\@'  # Updated placeholder
     
-  # Rest of parameters remain the same
-  datasets:
-    value: '{"openwebtext":0.4,"wikipedia":0.3,"books":0.2,"tinystories":0.1}'
-  
-  model_architecture:
-    value: 'original'
-  
+  wandb_log:
+    value: true
+
+  # Base dimensions sweep
   base_dim:
     values: [384, 512, 640, 768, 896, 1024]
   
-  # Fixed parameters
+  # Fixed architecture parameters  
+  model_architecture:
+    value: 'original'
   n_layer:
     value: 12
   head_dim:
     value: 64
+
+  # Remove multi-dataset config override, because Hydra does not parse
+  # something like "datasets={'books':0.2,...}" as a single override.
+  # Instead, rely on your default Hydra config for `datasets`.
+
+  # Training parameters
   learning_rate:
     value: 0.0003
   warmup_iters:
@@ -42,11 +45,13 @@ parameters:
   weight_decay:
     value: 0.01
   batch_size: 
-    value: 32
+    value: 16
   gradient_accumulation_steps:
     value: 1
-  max_iters:
-    value: 10000
+  max_iters: 
+    value: 2000
+
+  # Wandb settings
   wandb_project:
     value: "VSLM"
   wandb_entity:
@@ -55,7 +60,7 @@ parameters:
 # Command for single GPU runs
 command:
   - ${env}
-  - WANDB_SWEEP_ID=${sweep_id}  # Pass sweep ID to train.py
+  - WANDB_SWEEP_ID=${sweep_id}
   - python
   - ${program}
   - ${args_no_hyphens}

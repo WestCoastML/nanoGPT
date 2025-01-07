@@ -15,6 +15,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, Tuple, Union
 from torch.nn.parallel import DistributedDataParallel as DDP
+from omegaconf import OmegaConf, DictConfig
 
 logger = logging.getLogger(__name__)
 
@@ -146,37 +147,55 @@ class CheckpointManager:
                 except OSError as e:
                     logger.warning(f"Failed to remove old checkpoint {checkpoint}: {e}")
 
-def setup_output_dir(config: Dict[str, Any], 
-                    master_process: bool,
-                    wandb_run: Optional[Any] = None) -> Path:
-    """Setup training output directory structure"""
-    
+def setup_output_dir(
+    config: Dict[str, Any],
+    master_process: bool,
+    wandb_run: Optional[Any] = None
+) -> Path:
+    """
+    Setup training output directory structure so that each run
+    ends up with a dedicated subdirectory. For example, if out_dir
+    is 'runs/sweeps/kglgjv0c', then we create:
+        runs/sweeps/kglgjv0c/run_XYZ123
+    and put the checkpoints, config, logs, etc. there.
+
+    If wandb_run is present, we use wandb_run.id as the subfolder name.
+    Otherwise, we fallback to a short timestamp-based name.
+    """
     if wandb_run:
         sweep_id = wandb_run.sweep_id if wandb_run.sweep else None
-        run_id = wandb_run.id
+        # e.g. run_id might be "d1a2b3cd"
+        run_id = wandb_run.id or datetime.now().strftime("%Y%m%d_%H%M%S")
     else:
         sweep_id = None
         run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-    # Determine directory structure
+
     base_dir = Path(config.get('out_dir', 'runs'))
-    if sweep_id:
-        run_dir = base_dir / "sweeps" / sweep_id / f"run_{run_id}"
-    else:
-        run_dir = base_dir / "single" / f"run_{run_id}"
-        
+    # If user or wandb agent has replaced @@SWEEPID@@ etc. in config['out_dir'],
+    # base_dir might already be something like "runs/sweeps/kglgjv0c". We'll still
+    # create a subdirectory for the *individual run*, e.g. "run_XXX".
+    # If the base_dir already ends with "run_something", you might want to skip,
+    # but typically we do it unconditionally for consistent structure.
+
+    # We'll define a short name for the subfolder. If run_id is very long,
+    # you can slice it, e.g. run_id[:8].
+    short_run_id = run_id[:8] if len(run_id) >= 8 else run_id
+
+    # Decide on the final run_dir
+    # e.g. runs/sweeps/<SWEEPID>/run_<short_run_id>
+    run_dir = base_dir / f"run_{short_run_id}"
+
     if master_process:
-        # Create directory structure
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "checkpoints").mkdir(exist_ok=True)
         (run_dir / "logs").mkdir(exist_ok=True)
-        
-        # Save config
+
+        # Save config (handle both DictConfig and Python dict)
         save_config(config, run_dir)
-        
+
     return run_dir
 
-def save_config(config: Dict[str, Any], run_dir: Path):
+def save_config(config, run_dir: Path):
     """Save config with backup"""
     config_path = run_dir / "config.json"
     if config_path.exists():
@@ -188,7 +207,15 @@ def save_config(config: Dict[str, Any], run_dir: Path):
         
     # Save new config
     with open(config_path, 'w') as f:
-        json.dump(config, f, indent=2)
+        # If config is a DictConfig, convert it to a regular dictionary
+        if isinstance(config, DictConfig):
+            config_dict = OmegaConf.to_container(config, resolve=True)
+        else:
+            config_dict = config
+        
+        # Now dump the resulting dict as JSON
+        json.dump(config_dict, f, indent=2)
+    logger.info(f"Config saved to {config_path}")
 
 def resume_from_checkpoint(checkpoint_manager: CheckpointManager, 
                          run_id: str,
@@ -272,6 +299,12 @@ def save_training_state(checkpoint_manager: CheckpointManager,
                        is_best: bool = False):
     """Save complete training state with config hash"""
     
+    # Convert config if it is a DictConfig so that json.dumps will work
+    if isinstance(config, DictConfig):
+        safe_config = OmegaConf.to_container(config, resolve=True)
+    else:
+        safe_config = config
+    
     state_dict = {
         'model': model.module.state_dict() if isinstance(model, DDP) else model.state_dict(),
         'optimizer': optimizer.state_dict()
@@ -282,8 +315,8 @@ def save_training_state(checkpoint_manager: CheckpointManager,
         'val_loss': val_loss,
         'best_val_loss': best_val_loss,
         'timestamp': datetime.now().isoformat(),
-        'config': config,
-        'config_hash': hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+        'config': safe_config,
+        'config_hash': hashlib.sha256(json.dumps(safe_config, sort_keys=True).encode()).hexdigest()
     }
     
     checkpoint_manager.save_checkpoint(state_dict, metadata, is_best)

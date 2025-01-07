@@ -1,0 +1,7 @@
+# Default dataset info
+name: "openwebtext"
+weights:
+  openwebtext: 0.4
+  wikipedia: 0.3
+  books: 0.2
+  tinystories: 0.1

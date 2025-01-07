@@ -28,6 +28,25 @@ $ torchrun --standalone --nproc_per_node=4 train.py
 """
 
 import os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+"""
+By setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True early,
+we reduce fragmentation in certain GPU memory usage patterns.
+We use .setdefault() so that if user already has it set externally,
+that takes precedence. This call occurs before any big GPU calls,
+increasing the chance that it is respected.
+"""
+
+# ------------------------------------------------------------------
+# 1) NumExpr max threads environment variable if not set:
+import os
+if "NUMEXPR_MAX_THREADS" not in os.environ:
+    os.environ["NUMEXPR_MAX_THREADS"] = "64"
+    # Note: setting this does not meaningfully affect GPU memory usage,
+    # but prevents the warning about "defaulting to 8 threads" when you have many CPU cores.
+import numexpr
+# ------------------------------------------------------------------
+
 import time
 import math
 import signal
@@ -54,6 +73,9 @@ import logging
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 from utils.diamond_dim_utils import calculate_diamond_dims
+import hydra
+from omegaconf import DictConfig, OmegaConf
+from omegaconf import open_dict
 
 # Configure logging
 logging.basicConfig(
@@ -207,15 +229,32 @@ def setup_model_dimensions(config: Dict[str, Any]) -> Tuple[list, list, bool]:
 class TrainingManager:
     """Manages the training process with proper resource handling"""
     
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
+    def __init__(self, cfg: DictConfig):
+        self.cfg = cfg
         self.exit_flag = False
         self.checkpoint_manager = None
         self.wandb_logger = None
         self.dataset_handler = None
         self.training_start_time = time.time()
-        self.device = None  # Initialize device attribute
+        self.device = None
+        # A safety measure to track how often we halved batch_size due to OOM
+        self.oom_retries = 0
+        # We'll limit the number of times we can halve batch_size
+        self.oom_retry_limit = 3
         
+        # Process dataset configuration
+        datasets = cfg.get('datasets', {})
+        if not isinstance(datasets, dict):
+            logger.warning("`cfg.datasets` is not a dictionary. Falling back to single dataset mode.")
+            datasets = {"openwebtext": 1.0}
+
+        self.dataset_handler = ScalingDatasetHandler(
+            datasets=datasets,
+            data_dir='data',
+            block_size=cfg.block_size,
+            seed=1337
+        )
+
         # Register signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -250,8 +289,20 @@ class TrainingManager:
             })
 
             ddp = int(os.environ.get('RANK', -1)) != -1
+
+            # Example: if user sets cfg.ddp to true, do distributed init here
+            if getattr(self.cfg, "ddp", False):
+                # This is a placeholder. You could integrate real logic such as:
+                # init_process_group(backend=self.cfg.backend, ...)
+                # local_rank = ...
+                # device = f"cuda:{local_rank}"
+                # torch.cuda.set_device(device)
+                # self.cfg.gradient_accumulation_steps //= world_size
+                logger.info("cfg.ddp=True: user is requesting DDP mode (placeholder example)")
+                # The real logic is up to you. This is just a demonstration.
+
             if ddp:
-                logger.info("Initializing distributed training...")
+                logger.info("Initializing distributed training via RANK, LOCAL_RANK, WORLD_SIZE env vars")
                 
                 # Validate required environment variables
                 required_env_vars = ['RANK', 'LOCAL_RANK', 'WORLD_SIZE']
@@ -266,7 +317,7 @@ class TrainingManager:
                 # Initialize process group with timeout and error handling
                 try:
                     init_process_group(
-                        backend=self.config['backend'],
+                        backend=self.cfg.backend,
                         timeout=datetime.timedelta(minutes=30)
                     )
                     logger.info(f"Successfully initialized process group for rank {ddp_rank}")
@@ -286,12 +337,12 @@ class TrainingManager:
                 seed_offset = ddp_rank
                 
                 # Validate gradient accumulation steps
-                if self.config['gradient_accumulation_steps'] % ddp_world_size != 0:
+                if self.cfg.gradient_accumulation_steps % ddp_world_size != 0:
                     raise ValueError(
-                        f"gradient_accumulation_steps ({self.config['gradient_accumulation_steps']}) "
+                        f"gradient_accumulation_steps ({self.cfg.gradient_accumulation_steps}) "
                         f"must be divisible by world_size ({ddp_world_size})"
                     )
-                self.config['gradient_accumulation_steps'] //= ddp_world_size
+                self.cfg.gradient_accumulation_steps //= ddp_world_size
                 
                 # Set logging level for non-master processes
                 if not master_process:
@@ -308,13 +359,13 @@ class TrainingManager:
                 ddp_world_size = 1
                 master_process = True
                 seed_offset = 0
-                device = self.config['device']
+                device = self.cfg.device
                 
                 # Validate device configuration
                 if 'cuda' in device and not torch.cuda.is_available():
                     logger.warning("CUDA device requested but not available. Falling back to CPU.")
                     device = 'cpu'
-                    self.config['device'] = 'cpu'
+                    self.cfg.device = 'cpu'
             
             # Store device in class attribute
             self.device = device
@@ -346,71 +397,45 @@ class TrainingManager:
         """Setup training environment, directories and loggers"""
         
         # Verify critical config values
-        if self.config['init_from'] not in ['scratch', 'resume'] and not self.config['init_from'].startswith('gpt2'):
-            raise ValueError(f"Invalid init_from: {self.config['init_from']}")
+        if self.cfg.init_from not in ['scratch', 'resume'] and not self.cfg.init_from.startswith('gpt2'):
+            raise ValueError(f"Invalid init_from: {self.cfg.init_from}")
             
         # Setup directories
-        run_dir = setup_output_dir(self.config, master_process)
+        run_dir = setup_output_dir(self.cfg, self.master_process)
         self.checkpoint_manager = CheckpointManager(
             run_dir / "checkpoints",
             max_checkpoints=5
         )
-        
-        # Setup dataset handler
-        if self.config['datasets']:
-            self.dataset_handler = ScalingDatasetHandler(
-                datasets=self.config['datasets'],
-                data_dir='data',
-                block_size=self.config['block_size'],
-                seed=1337 + seed_offset
-            )
-            # Log dataset statistics
-            if master_process:
-                stats = self.dataset_handler.get_dataset_stats()
-                logger.info("Dataset statistics:")
-                logger.info(json.dumps(stats, indent=2))
-            data_dir = Path('data')
-        else:
-            data_dir = Path('data') / self.config['dataset']
-            
-        # Calculate tokens per iteration
-        self.tokens_per_iter = (
-            self.config['gradient_accumulation_steps'] *
-            (self.config['ddp_world_size'] if 'ddp_world_size' in self.config else 1) *
-            self.config['batch_size'] *
-            self.config['block_size']
-        )
-        
-        # Setup wandb logging
-        if self.config['wandb_log'] and master_process:
-            if self.config['datasets']:
-                experiment_config = ScalingExperimentConfig(
-                    n_layer=self.config['n_layer'],
-                    n_heads=self.config['n_heads'],
-                    layer_dims=self.config['layer_dims'],
-                    max_tokens=self.config['max_iters'] * self.tokens_per_iter,
-                    batch_size=self.config['batch_size'],
-                    learning_rate=self.config['learning_rate'],
-                    weight_decay=self.config['weight_decay'],
-                    warmup_tokens=self.config['warmup_iters'] * self.tokens_per_iter,
-                    final_tokens=self.config['max_iters'] * self.tokens_per_iter,
-                    datasets=self.config['datasets'],
-                    eval_datasets=list(self.config['datasets'].keys()),
-                    device=self.config['device'],
-                    dtype=self.config['dtype']
-                )
+
+        # Process dataset configuration
+        datasets = self.cfg.get('datasets', {})
+        # Force it to be a dictionary if Hydra loaded it differently
+        if not isinstance(datasets, dict):
+            logger.info("Converting cfg.datasets to a dictionary to avoid fallback mode.")
+            if hasattr(self.cfg, 'dataset') and isinstance(self.cfg.dataset, str):
+                datasets = {self.cfg.dataset: 1.0}
             else:
-                experiment_config = self.config
-                
-            self.wandb_logger = WandBLogger(
-                config=experiment_config,
-                project=self.config.get('wandb_project', 'VSLM'),
-                entity=self.config.get('wandb_entity', 'wcml'),
-                name=self.config.get('wandb_run_name')
-            )
-            
+                # fallback to single dataset named "openwebtext", or adapt as needed:
+                datasets = {"openwebtext": 1.0}
+            self.cfg.datasets = datasets
+
+        self.dataset_handler = ScalingDatasetHandler(
+            datasets=datasets,
+            data_dir='data',
+            block_size=self.cfg.block_size,
+            seed=1337 + seed_offset
+        )
+
+        data_dir = Path('data')
+        self.tokens_per_iter = (
+            self.cfg.gradient_accumulation_steps *
+            self.cfg.batch_size *
+            self.cfg.block_size *
+            self.world_size
+        )
+
         return run_dir, data_dir, float('inf')  # Initial best val loss
-        
+
     def setup_model(self, 
                 device: str,
                 ddp: bool,
@@ -419,37 +444,37 @@ class TrainingManager:
         """Setup model and optimizer with proper parameter count logging"""
         
         # Setup model dimensions
-        layer_dims, n_heads, use_unet = setup_model_dimensions(self.config)
-        self.config.update({
-            'layer_dims': layer_dims,
-            'n_heads': n_heads,
-            'use_unet': use_unet
-        })
+        layer_dims, n_heads, use_unet = setup_model_dimensions(self.cfg)
+        # Hydra config is often in "struct" mode; to add or modify keys, use open_dict
+        with open_dict(self.cfg):
+            self.cfg.layer_dims = layer_dims
+            self.cfg.n_heads = n_heads
+            self.cfg.use_unet = use_unet
         
         model_args = {
             'layer_dims': layer_dims,
             'n_heads': n_heads,
-            'block_size': self.config['block_size'],
-            'bias': self.config['bias'],
+            'block_size': self.cfg.block_size,
+            'bias': self.cfg.bias,
             'vocab_size': self.dataset_handler.vocab_size if self.dataset_handler else 50304,
-            'dropout': self.config['dropout'],
-            'n_layer': self.config['n_layer'],
-            'model_architecture': self.config['model_architecture'],
+            'dropout': self.cfg.dropout,
+            'n_layer': self.cfg.n_layer,
+            'model_architecture': self.cfg.model_architecture,
             'use_unet': use_unet
         }
         
         # Initialize model
-        if self.config['init_from'].startswith('gpt2'):
-            logger.info(f"Initializing from OpenAI GPT-2 weights: {self.config['init_from']}")
-            override_args = dict(dropout=self.config['dropout'])
-            model = GPT.from_pretrained(self.config['init_from'], override_args)
+        if self.cfg.init_from.startswith('gpt2'):
+            logger.info(f"Initializing from OpenAI GPT-2 weights: {self.cfg.init_from}")
+            override_args = dict(dropout=self.cfg.dropout)
+            model = GPT.from_pretrained(self.cfg.init_from, override_args)
         else:
             model = GPT(GPTConfig(**model_args))
             
         # Calculate and log parameter count
         num_params = sum(p.numel() for p in model.parameters())
-        if self.config.get('print_params_only', False):
-            logger.info(f"Number of parameters: {num_params/1e6:.2f}M")
+        if self.cfg.get('print_params_only', False):
+            logger.info(f"Number of parameters: {num_params/1e6:.2fM}")
             # Log to wandb before exiting if wandb is enabled
             if self.wandb_logger and self.master_process:
                 wandb.run.summary["number_of_parameters"] = num_params
@@ -468,17 +493,86 @@ class TrainingManager:
             # Verify DDP consistency
             self.verify_ddp_consistency(model, ddp_world_size)
             
-        if self.config['compile']:
-            model = torch.compile(model)
-            
-        # Configure optimizer
         optimizer = model.configure_optimizers(
-            weight_decay=self.config['weight_decay'],
-            learning_rate=self.config['learning_rate'],
-            betas=(self.config['beta1'], self.config['beta2']),
+            weight_decay=self.cfg.weight_decay,
+            learning_rate=self.cfg.learning_rate,
+            betas=(self.cfg.beta1, self.cfg.beta2),
             device_type='cuda' if 'cuda' in device else 'cpu'
         )
-        
+
+        if self.cfg.compile and torch.cuda.is_available():
+            model = torch.compile(model)
+            
+        run_id = os.environ.get("WANDB_RUN_ID", "noID")
+        base_dim = self.cfg.get('base_dim', 0)
+        head_dim = self.cfg.get('head_dim', 0)
+        # We'll initially set default_name = None; then define it below once we gather the real sweep_id, etc.
+        default_name = None
+
+        # Safely check for a user-specified wandb_run_name
+        wandb_run_name = self.cfg.get('wandb_run_name', None)
+        if wandb_run_name:
+            # If user wrote something like "run_${sweep_id}"
+            if "${sweep_id}" in wandb_run_name:
+                actual_sweep_id = os.environ.get("WANDB_SWEEP_ID", "")
+                if actual_sweep_id:
+                    wandb_run_name = wandb_run_name.replace("${sweep_id}", actual_sweep_id)
+                else:
+                    wandb_run_name = wandb_run_name.replace("${sweep_id}", "NOSWEEPID")
+            # Put it back into cfg
+            with open_dict(self.cfg):
+                self.cfg.wandb_run_name = wandb_run_name
+
+        # Now create a final default name that includes the actual sweep_id from environment:
+        run_id    = os.environ.get("WANDB_RUN_ID", "noID")
+        sweep_id  = os.environ.get("WANDB_SWEEP_ID", "mysweep")  # fallback if not set
+        short_run_id = run_id[:6] if len(run_id) >= 6 else run_id
+        default_name = f"{sweep_id}-base{base_dim}-head{head_dim}-run{short_run_id}"
+
+        if self.cfg.wandb_log and self.master_process:
+            if self.cfg.datasets:
+                from utils.wandb_logger import ScalingExperimentConfig
+
+        # Create a more descriptive run name if using wandb
+        # For example: "mysweep-base384-head64-runASDF12"
+        # Using random short run ID from wandb if available
+        run_id    = os.environ.get("WANDB_RUN_ID", "noID")
+        sweep_id  = os.environ.get("WANDB_SWEEP_ID", "mysweep")  # default to "mysweep" if not found
+        base_dim  = self.cfg.get('base_dim', 0)
+        head_dim  = self.cfg.get('head_dim', 0)
+
+        # Instead of "mysweep", use the actual sweep_id as prefix:
+        # e.g. cthcyydc-base384-head64-run8tpq09
+        short_run_id = run_id[:6] if len(run_id) >= 6 else run_id
+        default_name = f"{sweep_id}-base{base_dim}-head{head_dim}-run{short_run_id}"
+
+        if self.cfg.wandb_log and self.master_process:
+            # If user didn't specify 'wandb_run_name', fallback to default_name
+            if self.cfg.datasets:
+                from utils.wandb_logger import ScalingExperimentConfig
+                experiment_config = ScalingExperimentConfig(
+                    n_layer=self.cfg.n_layer,
+                    n_heads=self.cfg.n_heads,
+                    layer_dims=self.cfg.layer_dims,
+                    max_tokens=self.cfg.max_iters * self.tokens_per_iter,
+                    batch_size=self.cfg.batch_size,
+                    learning_rate=self.cfg.learning_rate,
+                    weight_decay=self.cfg.weight_decay,
+                    warmup_tokens=self.cfg.warmup_iters * self.tokens_per_iter,
+                    final_tokens=self.cfg.max_iters * self.tokens_per_iter,
+                    datasets=self.cfg.datasets,
+                    eval_datasets=list(self.cfg.datasets.keys()),
+                    device=self.cfg.device,
+                    dtype=self.cfg.dtype
+                )
+                self.wandb_logger = WandBLogger(
+                    config=experiment_config,
+                    project=self.cfg.get('wandb_project', 'VSLM'),
+                    entity=self.cfg.get('wandb_entity', 'wcml'),
+                    name=self.cfg.get('wandb_run_name', default_name),
+                    group=self.cfg.get('wandb_group', None)
+                )
+
         return model, optimizer
 
     def train_step(self, 
@@ -489,18 +583,59 @@ class TrainingManager:
                   ddp: bool,
                   scaler: torch.cuda.amp.GradScaler,
                   micro_step: int) -> torch.Tensor:
+        """
+        Single training micro-step with gradient accumulation.
+        Wrapped in an OOM retry so we can attempt smaller batch size if we fail.
+        """
+        attempt = 0
+        while True:
+            try:
+                return self._train_step_once(
+                    model, optimizer, X, Y, ddp, scaler, micro_step
+                )
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    if self.cfg.batch_size > 1 and self.oom_retries < self.oom_retry_limit:
+                        self.cfg.batch_size = max(1, self.cfg.batch_size // 2)
+                        self.oom_retries += 1
+                        # Update tokens_per_iter after batch size change
+                        self.tokens_per_iter = (
+                            self.cfg.gradient_accumulation_steps * 
+                            self.cfg.batch_size * 
+                            self.cfg.block_size * 
+                            self.world_size
+                        )
+                        logger.warning(
+                            f"OOM detected, halving batch_size to {self.cfg.batch_size} "
+                            f"(retry {self.oom_retries}/{self.oom_retry_limit})"
+                        )
+                        # Force freeing cache, then re-fetch batch
+                        self.cleanup_memory()
+                        X, Y = self.get_batch('train')
+                        continue
+                # If no more fallback is possible, re-raise
+                raise e
+
+    def _train_step_once(self,
+                         model: torch.nn.Module,
+                         optimizer: torch.optim.Optimizer,
+                         X: torch.Tensor,
+                         Y: torch.Tensor,
+                         ddp: bool,
+                         scaler: torch.cuda.amp.GradScaler,
+                         micro_step: int) -> torch.Tensor:
         """Single training step with gradient accumulation"""
         
         # DDP gradient sync control
         if ddp:
             model.require_backward_grad_sync = (
-                micro_step == self.config['gradient_accumulation_steps'] - 1
+                micro_step == self.cfg.gradient_accumulation_steps - 1
             )
         
         # Forward pass
         with self.ctx:
             logits, loss = model(X, Y)
-            loss = loss / self.config['gradient_accumulation_steps']
+            loss = loss / self.cfg.gradient_accumulation_steps
             
         # Backward pass
         scaler.scale(loss).backward()
@@ -511,7 +646,7 @@ class TrainingManager:
         """Get batch from dataset handler or memory map"""
         if self.dataset_handler:
             return self.dataset_handler.get_batch(
-                self.config['batch_size'],
+                self.cfg.batch_size,
                 split,
                 self.device
             )
@@ -522,15 +657,15 @@ class TrainingManager:
                 mode='r'
             )
             ix = torch.randint(
-                len(data) - self.config['block_size'],
-                (self.config['batch_size'],)
+                len(data) - self.cfg.block_size,
+                (self.cfg.batch_size,)
             )
             x = torch.stack([
-                torch.from_numpy((data[i:i+self.config['block_size']]).astype(np.int64))
+                torch.from_numpy((data[i:i+self.cfg.block_size]).astype(np.int64))
                 for i in ix
             ])
             y = torch.stack([
-                torch.from_numpy((data[i+1:i+1+self.config['block_size']]).astype(np.int64))
+                torch.from_numpy((data[i+1:i+1+self.cfg.block_size]).astype(np.int64))
                 for i in ix
             ])
             
@@ -549,8 +684,8 @@ class TrainingManager:
         
         try:
             for split in ['train', 'val']:
-                batch_losses = torch.zeros(self.config['eval_iters'], device=device)
-                for k in range(self.config['eval_iters']):
+                batch_losses = torch.zeros(self.cfg.eval_iters, device=device)
+                for k in range(self.cfg.eval_iters):
                     X, Y = self.get_batch(split)
                     with self.ctx:
                         _, loss = model(X, Y)
@@ -583,7 +718,7 @@ class TrainingManager:
                 'float32': torch.float32,
                 'bfloat16': torch.bfloat16,
                 'float16': torch.float16
-            }[self.config['dtype']]
+            }[self.cfg.dtype]
             self.ctx = nullcontext() if device_type == 'cpu' else \
                       torch.amp.autocast(device_type=device_type, dtype=ptdtype)
             
@@ -603,20 +738,29 @@ class TrainingManager:
             )
             
             # Load state if resuming
-            if self.config['init_from'] == 'resume':
-                self.model, self.optimizer, self.iter_num, self.best_val_loss = load_training_state(
-                    self.checkpoint_manager,
+            if self.cfg.init_from == 'resume':
+                (
                     self.model,
                     self.optimizer,
-                    self.device,
-                    self.ddp
+                    self.iter_num,
+                    self.best_val_loss
+                ) = load_training_state(
+                    checkpoint_manager=self.checkpoint_manager,
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    device=self.device,
+                    config=self.cfg,
+                    ddp=self.ddp
                 )
             else:
                 self.iter_num = 0
                 
             # Initialize training state
             self.scaler = torch.cuda.amp.GradScaler(
-                enabled=(self.config['dtype'] == 'float16')
+                # Allowed in PyTorch 2.5.0
+                enabled=(self.cfg.dtype == 'float16'),
+                growth_interval=2000,
+                init_scale=65536.0
             )
             
             self.raw_model = self.model.module if isinstance(self.model, DDP) else self.model
@@ -636,7 +780,7 @@ class TrainingManager:
                     param_group['lr'] = lr
                     
                 # Evaluation
-                if self.iter_num % self.config['eval_interval'] == 0 and self.master_process:
+                if self.iter_num % self.cfg.eval_interval == 0 and self.master_process:
                     losses = self.evaluate(self.model, self.device)
                     logger.info(
                         f"step {self.iter_num}: train loss {losses['train']:.4f}, "
@@ -664,12 +808,12 @@ class TrainingManager:
                         
                     # Save checkpoint
                     is_best = losses['val'] < self.best_val_loss
-                    if is_best or self.config['always_save_checkpoint']:
+                    if is_best or self.cfg.always_save_checkpoint:
                         save_training_state(
                             self.checkpoint_manager,
                             self.model,
                             self.optimizer,
-                            self.config,
+                            self.cfg,
                             self.iter_num,
                             losses['val'],
                             self.best_val_loss,
@@ -679,8 +823,9 @@ class TrainingManager:
                             self.best_val_loss = losses['val']
                             
                 # Gradient accumulation training loop
-                for micro_step in range(self.config['gradient_accumulation_steps']):
-                    loss = self.train_step(
+                for micro_step in range(self.cfg.gradient_accumulation_steps):
+                    # <-- Now calls the new wrapper that can catch OOM
+                    step_loss = self.train_step(
                         self.model,
                         self.optimizer,
                         self.X,
@@ -689,16 +834,18 @@ class TrainingManager:
                         self.scaler,
                         micro_step
                     )
-                    
-                    # Prefetch next batch
+                    # step_loss is only the micro-batch portion of total loss
+                    loss = step_loss
+
+                    # Re-fetch next batch in case batch_size changed from OOM handling
                     self.X, self.Y = self.get_batch('train')
-                    
+
                 # Gradient clipping and optimization step
-                if self.config['grad_clip'] != 0.0:
+                if self.cfg.grad_clip != 0.0:
                     self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(),
-                        self.config['grad_clip']
+                        self.cfg.grad_clip
                     )
                     
                 self.scaler.step(self.optimizer)
@@ -710,12 +857,12 @@ class TrainingManager:
                 dt = t1 - t0
                 t0 = t1
                 
-                if self.iter_num % self.config['log_interval'] == 0 and self.master_process:
+                if self.iter_num % self.cfg.log_interval == 0 and self.master_process:
                     # Calculate loss and MFU
-                    lossf = loss.item() * self.config['gradient_accumulation_steps']
+                    lossf = loss.item() * self.cfg.gradient_accumulation_steps
                     if local_iter_num >= 5:  # Let training stabilize
                         mfu = self.raw_model.estimate_mfu(
-                            self.config['batch_size'] * self.config['gradient_accumulation_steps'],
+                            self.cfg.batch_size * self.cfg.gradient_accumulation_steps,
                             dt
                         )
                         running_mfu = mfu if running_mfu < 0 else 0.9 * running_mfu + 0.1 * mfu
@@ -755,7 +902,7 @@ class TrainingManager:
                 local_iter_num += 1
                 
                 # Exit conditions
-                if self.iter_num > self.config['max_iters']:
+                if self.iter_num > self.cfg.max_iters:
                     break
                     
                 # Periodic cleanup
@@ -789,74 +936,69 @@ class TrainingManager:
             
     def get_lr(self, it: int) -> float:
         """Get learning rate for current iteration"""
-        if not self.config['decay_lr']:
-            return self.config['learning_rate']
+        if not self.cfg.decay_lr:
+            return self.cfg.learning_rate
             
         # Learning rate decay logic
-        if it < self.config['warmup_iters']:
-            return self.config['learning_rate'] * it / self.config['warmup_iters']
+        if it < self.cfg.warmup_iters:
+            return self.cfg.learning_rate * it / self.cfg.warmup_iters
             
-        if it > self.config['lr_decay_iters']:
-            return self.config['min_lr']
+        if it > self.cfg.lr_decay_iters:
+            return self.cfg.min_lr
             
         # Cosine learning rate decay
-        decay_ratio = (it - self.config['warmup_iters']) / (
-            self.config['lr_decay_iters'] - self.config['warmup_iters']
+        decay_ratio = (it - self.cfg.warmup_iters) / (
+            self.cfg.lr_decay_iters - self.cfg.warmup_iters
         )
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-        return self.config['min_lr'] + coeff * (
-            self.config['learning_rate'] - self.config['min_lr']
+        return self.cfg.min_lr + coeff * (
+            self.cfg.learning_rate - self.cfg.min_lr
         )
 
-def main():
-    """Main entry point with config processing and training"""
-    
-    # Process command line arguments and config
-    # Get all keys from default config
-    from config.defaults import get_default_config
-    default_config = get_default_config()
-    config_keys = list(default_config.keys())
-    
-    # Add any additional keys from globals
-    global_config_keys = [k for k, v in globals().items() if not k.startswith('_') 
-                         and isinstance(v, (int, float, bool, str, list, dict))]
-    config_keys.extend(k for k in global_config_keys if k not in config_keys)
-    
-    # Add special config keys that might not be in defaults
-    special_keys = ["config_path", "n_dims", "datasets"]
-    config_keys.extend(k for k in special_keys if k not in config_keys)
-    
-    # Execute configurator
-    exec(open('configurator.py').read(), globals())
-    
-    # Build config
-    config = {k: globals()[k] for k in config_keys}
-    config['datasets'] = process_datasets_config(config.get('datasets', {}))
-    
-    try:
-        # Create and run training manager
-        validate_config(config)
-        trainer = TrainingManager(config)
-        trainer.train()
-    except KeyboardInterrupt:
-        logger.info("Training interrupted by user")
-    except Exception as e:
-        logger.error(f"Training failed with error: {e}")
-        raise
-    finally:
-        logger.info("Training completed or interrupted. Cleaning up...")
-
-if __name__ == '__main__':
-    # Set up basic logging configuration before anything else
-    logging.basicConfig(
-        format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
-        level=logging.INFO,
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
+@hydra.main(
+    version_base=None,  # or "1.3" if Hydra 1.3
+    config_path="config/hydra",
+    config_name="train.yaml"
+)
+def main(cfg: DictConfig):
     logger = logging.getLogger(__name__)
-    
-    try:
-        main()
-    except Exception as e:
-        logger.error(f"Fatal error in main: {e}", exc_info=True)
-        sys.exit(1)
+    logger.info(f"Final Hydra config:\n{OmegaConf.to_yaml(cfg, resolve=True)}")
+
+    def maybe_replace_sweeprun_placeholder(config_dict):
+        placeholder = "@@SWEEPID@@"
+
+        def replace_placeholder_in_string(s: str) -> str:
+            if placeholder not in s:
+                return s
+            wandb_sweep_id = os.environ.get("WANDB_SWEEP_ID", "")
+            local_sweep_id = os.environ.get("LOCAL_SWEEP_ID", "")
+            if wandb_sweep_id:
+                return s.replace(placeholder, wandb_sweep_id)
+            elif local_sweep_id:
+                return s.replace(placeholder, local_sweep_id)
+            else:
+                logger.warning(
+                    f"No WANDB_SWEEP_ID or LOCAL_SWEEP_ID found in environment; placeholder remains in {s}"
+                )
+                return s
+
+        # Recurse into nested structures if needed
+        for key, val in list(config_dict.items()):
+            if isinstance(val, str):
+                config_dict[key] = replace_placeholder_in_string(val)
+            elif isinstance(val, dict):
+                maybe_replace_sweeprun_placeholder(val)
+            elif isinstance(val, list):
+                for i, item in enumerate(val):
+                    if isinstance(item, str):
+                        val[i] = replace_placeholder_in_string(item)
+
+    # Do that replacement before the training manager is constructed
+    maybe_replace_sweeprun_placeholder(cfg)
+
+    trainer = TrainingManager(cfg)
+    trainer.train()
+    logger.info("Training ended OK.")
+
+if __name__ == "__main__":
+    main()

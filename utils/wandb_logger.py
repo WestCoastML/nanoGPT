@@ -71,11 +71,13 @@ class WandBLogger:
 
     def _get_tags(self):
         """Get appropriate tags based on config type"""
+        param_count = None
         if isinstance(self.config, ScalingExperimentConfig):
             return [
-                f"n_params_{self._get_param_count()}",
+                # compute param count if possible
+                f"n_params_{self._get_param_count() or 'unknown'}",
                 f"n_layers_{self.config.n_layer}",
-                f"datasets_{'-'.join(self.config.datasets.keys())}"
+                f"datasets_{'-'.join(self.config.datasets.keys())}" if self.config.datasets else "datasets_unknown"
             ]
         else:
             return [
@@ -87,9 +89,18 @@ class WandBLogger:
 
     def _get_param_count(self) -> int:
         """Calculate non-embedding parameter count"""
-        if isinstance(self.config, ScalingExperimentConfig):
-            return sum(12 * dim * dim for dim in self.config.layer_dims)
-        return None
+        """
+        Only do a rough calculation if we have layer_dims available;
+        otherwise return None to skip param count.
+        """
+        if isinstance(self.config, ScalingExperimentConfig) and self.config.layer_dims is not None:
+            # If layer_dims is a list
+            if isinstance(self.config.layer_dims, list):
+                return sum(12 * dim * dim for dim in self.config.layer_dims)
+            else:
+                return None
+        else:
+            return None
 
     def log_metrics(self, metrics: Dict[str, Any]):
         """Generic method to log any metrics through wandb"""

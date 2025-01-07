@@ -22,7 +22,7 @@ def get_default_config():
         'wandb_run_name': 'gpt2',
         
         # Dataset configuration
-        'datasets': {},  # Multi-dataset weights
+        'datasets': {"openwebtext":0.4, "wikipedia":0.3, "books":0.2, "tinystories":0.1},  # Multi-dataset weights
         'dataset': 'openwebtext',  # Single dataset fallback
         
         # Training hyperparameters
