@@ -29,13 +29,29 @@ $ torchrun --standalone --nproc_per_node=4 train.py
 
 import os
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-"""
-By setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True early,
-we reduce fragmentation in certain GPU memory usage patterns.
-We use .setdefault() so that if user already has it set externally,
-that takes precedence. This call occurs before any big GPU calls,
-increasing the chance that it is respected.
-"""
+import sys
+import argparse
+import logging
+# ...existing code...
+
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
+    level=logging.INFO,
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+def parse_debug_flag():
+    parser = argparse.ArgumentParser()
+    # We parse known args to not conflict with Hydra’s -- overrides
+    parser.add_argument("--debug", action="store_true", help="Enable DEBUG logging.")
+    args, unknown = parser.parse_known_args()
+    return args.debug
+
+DEBUG_MODE = parse_debug_flag()
+if DEBUG_MODE:
+    logger.setLevel(logging.DEBUG)
+    logger.debug("DEBUG logging enabled in train.py")
 
 # ------------------------------------------------------------------
 # 1) NumExpr max threads environment variable if not set:
@@ -502,54 +518,23 @@ class TrainingManager:
 
         if self.cfg.compile and torch.cuda.is_available():
             model = torch.compile(model)
+
+        # Build the wandb name before creating the logger
+        if self.cfg.wandb_log and self.master_process:
+            # Get the model dimensions from config
+            base_dim = self.cfg.get('base_dim', 0)
+            head_dim = self.cfg.get('head_dim', 0)
             
-        run_id = os.environ.get("WANDB_RUN_ID", "noID")
-        base_dim = self.cfg.get('base_dim', 0)
-        head_dim = self.cfg.get('head_dim', 0)
-        # We'll initially set default_name = None; then define it below once we gather the real sweep_id, etc.
-        default_name = None
-
-        # Safely check for a user-specified wandb_run_name
-        wandb_run_name = self.cfg.get('wandb_run_name', None)
-        if wandb_run_name:
-            # If user wrote something like "run_${sweep_id}"
-            if "${sweep_id}" in wandb_run_name:
-                actual_sweep_id = os.environ.get("WANDB_SWEEP_ID", "")
-                if actual_sweep_id:
-                    wandb_run_name = wandb_run_name.replace("${sweep_id}", actual_sweep_id)
-                else:
-                    wandb_run_name = wandb_run_name.replace("${sweep_id}", "NOSWEEPID")
-            # Put it back into cfg
-            with open_dict(self.cfg):
-                self.cfg.wandb_run_name = wandb_run_name
-
-        # Now create a final default name that includes the actual sweep_id from environment:
-        run_id    = os.environ.get("WANDB_RUN_ID", "noID")
-        sweep_id  = os.environ.get("WANDB_SWEEP_ID", "mysweep")  # fallback if not set
-        short_run_id = run_id[:6] if len(run_id) >= 6 else run_id
-        default_name = f"{sweep_id}-base{base_dim}-head{head_dim}-run{short_run_id}"
-
-        if self.cfg.wandb_log and self.master_process:
+            # Get the run ID and sweep ID from environment
+            run_id = os.environ.get("WANDB_RUN_ID", "noID")
+            sweep_id = os.environ.get("WANDB_SWEEP_ID", "mysweep")
+            short_run_id = run_id[:6] if len(run_id) >= 6 else run_id
+            
+            # Build name in required format: kglgjv0c-base384-head64-runyut8fd
+            default_name = f"{sweep_id}-base{base_dim}-head{head_dim}-run{short_run_id}"
+            
+            # Create and initialize the logger
             if self.cfg.datasets:
-                from utils.wandb_logger import ScalingExperimentConfig
-
-        # Create a more descriptive run name if using wandb
-        # For example: "mysweep-base384-head64-runASDF12"
-        # Using random short run ID from wandb if available
-        run_id    = os.environ.get("WANDB_RUN_ID", "noID")
-        sweep_id  = os.environ.get("WANDB_SWEEP_ID", "mysweep")  # default to "mysweep" if not found
-        base_dim  = self.cfg.get('base_dim', 0)
-        head_dim  = self.cfg.get('head_dim', 0)
-
-        # Instead of "mysweep", use the actual sweep_id as prefix:
-        # e.g. cthcyydc-base384-head64-run8tpq09
-        short_run_id = run_id[:6] if len(run_id) >= 6 else run_id
-        default_name = f"{sweep_id}-base{base_dim}-head{head_dim}-run{short_run_id}"
-
-        if self.cfg.wandb_log and self.master_process:
-            # If user didn't specify 'wandb_run_name', fallback to default_name
-            if self.cfg.datasets:
-                from utils.wandb_logger import ScalingExperimentConfig
                 experiment_config = ScalingExperimentConfig(
                     n_layer=self.cfg.n_layer,
                     n_heads=self.cfg.n_heads,
@@ -729,6 +714,10 @@ class TrainingManager:
                 self.seed_offset
             )
             
+            # Print out checkpoint directory in debug mode
+            if self.master_process and logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"Checkpoint directory: {self.checkpoint_manager.checkpoint_dir}")
+
             # Create model and optimizer
             self.model, self.optimizer = self.setup_model(
                 self.device,
@@ -773,6 +762,17 @@ class TrainingManager:
             local_iter_num = 0
             running_mfu = -1.0
             
+            # ------------------------------------------------------------------
+            # Force an immediate checkpoint at iteration=0, so the user has
+            # a fallback checkpoint in case the run crashes before eval_interval.
+            # (If you prefer to do this once outside the loop, that is also fine.)
+            if self.iter_num == 0 and self.master_process:
+                logger.info("Saving initial checkpoint at iteration=0 (pre-loop).")
+                save_training_state(
+                    self.checkpoint_manager,
+                    self.model,
+                    self.optimizer, self.cfg, 0, float('inf'), self.best_val_loss, is_best=False)
+
             while not self.exit_flag:
                 # Learning rate update
                 lr = self.get_lr(self.iter_num)
@@ -809,6 +809,14 @@ class TrainingManager:
                     # Save checkpoint
                     is_best = losses['val'] < self.best_val_loss
                     if is_best or self.cfg.always_save_checkpoint:
+                        # Always save a checkpoint at iteration 0 (or any iteration).
+                        # This ensures there is a checkpoint even if we crash early.
+                        if self.iter_num == 0:
+                            logger.info("Saving initial checkpoint at iteration 0.")
+                            save_training_state(
+                                self.checkpoint_manager,
+                                self.model,
+                                self.optimizer, self.cfg, 0, losses['val'], self.best_val_loss, is_best=False)
                         save_training_state(
                             self.checkpoint_manager,
                             self.model,
@@ -962,43 +970,108 @@ class TrainingManager:
 )
 def main(cfg: DictConfig):
     logger = logging.getLogger(__name__)
+    # Handle environment variables for sweep_id and debug
+    with open_dict(cfg):
+        if ('wandb_sweep_id' in cfg and 
+            isinstance(cfg.wandb_sweep_id, str) and
+            '${oc.env:WANDB_SWEEP_ID}' in cfg.wandb_sweep_id):
+            cfg.wandb_sweep_id = os.environ.get('WANDB_SWEEP_ID', '')
+        
+        out_dir = cfg.get('out_dir', '')
+        if '@@SWEEPID@@' in out_dir:
+            cfg.out_dir = out_dir.replace('@@SWEEPID@@', os.environ.get('WANDB_SWEEP_ID', ''))
     logger.info(f"Final Hydra config:\n{OmegaConf.to_yaml(cfg, resolve=True)}")
 
-    def maybe_replace_sweeprun_placeholder(config_dict):
+    # Debug: Log the final wandb_run_name that Hydra substituted
+    if "wandb_run_name" in cfg:
+        logger.debug(f"Hydra-substituted wandb_run_name = '{cfg.wandb_run_name}'")
+
+    # ----------------------------------------------------------------
+    # DEBUG PRINTS: Check environment and config before placeholders
+    # ----------------------------------------------------------------
+    wandb_sweep_env = os.environ.get("WANDB_SWEEP_ID", "<NOT_SET>")
+    logger.debug(f"ENV WANDB_SWEEP_ID = {wandb_sweep_env}")
+    logger.debug(f"DEBUG: WANDB_SWEEP_ID = {wandb_sweep_env}")
+    local_sweep_env = os.environ.get("LOCAL_SWEEP_ID", "<NOT_SET>")
+    logger.info(f"DEBUG: LOCAL_SWEEP_ID = {local_sweep_env}")
+
+    out_dir_before = cfg.get("out_dir", "<missing>")
+    logger.info(f"DEBUG: out_dir BEFORE placeholder fix = {out_dir_before}")
+
+    # ---------------------------------------------------------------------
+    # FIX 1: Define local wandb_sweep_id from cfg so the "if wandb_sweep_id"
+    #        references a properly assigned variable.
+    wandb_sweep_id = cfg.get('wandb_sweep_id', None)
+    # If it is literally "${sweep_id}", assume agent did not replace it
+    if wandb_sweep_id == "${sweep_id}":
+        wandb_sweep_id = None
+    # Optionally store it back to cfg
+    cfg.wandb_sweep_id = wandb_sweep_id
+
+    debug_flag = getattr(cfg, "debug", False)
+    if debug_flag:
+        logger.setLevel(logging.DEBUG)
+        logger.debug("Debug mode is active from Hydra config +debug=true")
+
+    def maybe_replace_sweeprun_placeholder(hydra_cfg) -> DictConfig:
+        """
+        If wandb_sweep_id is set, replace @@SWEEPID@@ in out_dir
+        Otherwise try local_sweep_env, else skip.
+        """
         placeholder = "@@SWEEPID@@"
 
-        def replace_placeholder_in_string(s: str) -> str:
-            if placeholder not in s:
-                return s
-            wandb_sweep_id = os.environ.get("WANDB_SWEEP_ID", "")
-            local_sweep_id = os.environ.get("LOCAL_SWEEP_ID", "")
-            if wandb_sweep_id:
-                return s.replace(placeholder, wandb_sweep_id)
-            elif local_sweep_id:
-                return s.replace(placeholder, local_sweep_id)
+        # 1) Try wandb_sweep_id from Hydra param:
+        real_id = wandb_sweep_id or ""
+        if not real_id:
+            # 2) If that fails, try LOCAL_SWEEP_ID
+            logger.warning("No valid wandb_sweep_id, trying LOCAL_SWEEP_ID...")
+            real_id = local_sweep_env if local_sweep_env != "<NOT_SET>" else ""
+
+        if not real_id or real_id == "${sweep_id}":
+            logger.warning(
+                f"No valid sweep ID found (wandb_sweep_id={wandb_sweep_id}, local={local_sweep_env})."
+                " Skipping placeholder replacement."
+            )
+            return hydra_cfg
+
+        logger.info(f"DEBUG: Replacing '@@SWEEPID@@' with real_id='{real_id}' in out_dir.")
+        # Convert Hydra config to a dict
+        cfg_dict = OmegaConf.to_container(hydra_cfg, resolve=True)
+
+        # Recursively replace strings
+        def replace_strings_in_obj(obj):
+            if isinstance(obj, str):
+                return obj.replace(placeholder, real_id)
+            elif isinstance(obj, list):
+                return [replace_strings_in_obj(x) for x in obj]
+            elif isinstance(obj, dict):
+                return {k: replace_strings_in_obj(v) for k, v in obj.items()}
             else:
-                logger.warning(
-                    f"No WANDB_SWEEP_ID or LOCAL_SWEEP_ID found in environment; placeholder remains in {s}"
-                )
-                return s
+                return obj
 
-        # Recurse into nested structures if needed
-        for key, val in list(config_dict.items()):
-            if isinstance(val, str):
-                config_dict[key] = replace_placeholder_in_string(val)
-            elif isinstance(val, dict):
-                maybe_replace_sweeprun_placeholder(val)
-            elif isinstance(val, list):
-                for i, item in enumerate(val):
-                    if isinstance(item, str):
-                        val[i] = replace_placeholder_in_string(item)
+        replaced = replace_strings_in_obj(cfg_dict)
+        new_cfg = OmegaConf.create(replaced)
+        if debug_flag:
+            logger.debug(f"Post-replacement out_dir={new_cfg.get('out_dir')}")
+        return new_cfg
 
-    # Do that replacement before the training manager is constructed
-    maybe_replace_sweeprun_placeholder(cfg)
+    # Now actually do the replacement
+    cfg = maybe_replace_sweeprun_placeholder(cfg)
+    logger.info(f"DEBUG: out_dir AFTER placeholder fix = {cfg.get('out_dir','<missing>')}")
 
     trainer = TrainingManager(cfg)
+    if debug_flag:
+        logger.debug("About to start trainer.train() in debug mode.")
     trainer.train()
     logger.info("Training ended OK.")
+
+# ...existing code...
+    # Extra note: if runs appear to finish too quickly, 
+    # check that you do not have a small max_iters (e.g. 1 or 2). 
+    # Also verify the training loop is indeed running. 
+    # Example: set max_iters=1000 or more, or remove 
+    # code that calls `sys.exit(0)` prematurely, etc.
+# ...existing code...
 
 if __name__ == "__main__":
     main()

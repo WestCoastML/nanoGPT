@@ -5,7 +5,7 @@ from datasets import load_dataset
 import pickle
 
 # Load the dataset from Hugging Face
-dataset = load_dataset("roneneldan/TinyStories")
+dataset = load_dataset("roneneldan/TinyStories", trust_remote_code=True)
 
 # TinyStories has 'train' and 'validation' splits already
 train_data = dataset['train']['text']

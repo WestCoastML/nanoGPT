@@ -36,7 +36,7 @@ bias: false
 learning_rate: 0.0006
 layer_dims: null
 ddp: false
-wandb_run_name: null
+wandb_run_name: "sweepid=${wandb_sweep_id}_model=${model_architecture}_lr=${learning_rate}_bs=${batch_size}_dim=${base_dim}"
 print_params_only: false
 max_iters: 600000
 weight_decay: 0.1

@@ -14,7 +14,7 @@ enc = tiktoken.get_encoding("gpt2")
 
 if __name__ == '__main__':
     print("Loading BookCorpus dataset...")
-    dataset = load_dataset("bookcorpus", num_proc=num_proc_load_dataset)
+    dataset = load_dataset("bookcorpus", num_proc=num_proc_load_dataset, trust_remote_code=True)
 
     # Create train/val split
     split_dataset = dataset["train"].train_test_split(test_size=0.0005, seed=2357, shuffle=True)

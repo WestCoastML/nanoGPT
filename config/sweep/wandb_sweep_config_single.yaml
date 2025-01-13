@@ -11,11 +11,14 @@ metric:
   name: eval/val_loss
   goal: minimize
 
+# concurrency: 2  # <--- limit how many parallel runs happen at once
+# run_cap: 6        # E.g. total of 6 runs, but concurrency:2 means 2 can run at once
+
 parameters:
-  # Base config and output structure
+  # Now we can have out_dir reference ${sweep_id} via Hydra interpolation
   out_dir:
-    value: 'runs/sweeps/\@\@SWEEPID\@\@'  # Updated placeholder
-    
+    value: "runs/sweeps/${oc.env:WANDB_SWEEP_ID,'undefined'}"  # Updated for Hydra oc.env syntax
+
   wandb_log:
     value: true
 
@@ -59,8 +62,9 @@ parameters:
 
 # Command for single GPU runs
 command:
-  - ${env}
-  - WANDB_SWEEP_ID=${sweep_id}
   - python
-  - ${program}
+  - train.py
+  - +hydra.job.name=wandb_agent
+  - +wandb_sweep_id=$WANDB_SWEEP_ID
+  - +debug=$debug
   - ${args_no_hyphens}

@@ -24,7 +24,7 @@ enc = tiktoken.get_encoding("gpt2")
 
 if __name__ == '__main__':
     print("Loading OpenWebText dataset. This may be large (~8M documents)...")
-    dataset = load_dataset("openwebtext", num_proc=num_proc_load_dataset)
+    dataset = load_dataset("openwebtext", num_proc=num_proc_load_dataset, trust_remote_code=True)
 
     # By default, openwebtext has only a 'train' split.
     # We'll create a tiny validation split (0.05%)

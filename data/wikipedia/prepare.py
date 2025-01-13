@@ -15,7 +15,7 @@ enc = tiktoken.get_encoding("gpt2")
 if __name__ == '__main__':
     print("Loading Wikipedia dataset...")
     # Load latest English Wikipedia dump
-    dataset = load_dataset("wikipedia", "20220301.en", num_proc=num_proc_load_dataset)
+    dataset = load_dataset("wikipedia", "20220301.en", num_proc=num_proc_load_dataset, trust_remote_code=True)
 
     # Filter out short articles and redirect pages
     def is_valid_article(example):

@@ -1,7 +1,9 @@
 import wandb
 import numpy as np
 import torch
+import os  # we need this for os.environ
 import psutil
+import logging
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Dict, Any, Optional
@@ -46,15 +48,24 @@ class WandBLogger:
         self.config = config
         self.device = torch.cuda.current_device() if torch.cuda.is_available() else None
         self.start_time = datetime.now()
-        
-        # Initialize run with richer config
+
+        # Force the run name so that WandB does not override it with 
+        # the usual agent naming like silver-sweep-6, lyric-sweep-2, etc.
+
         self.run = wandb.init(
             project=project,
             entity=entity,
             name=name,
             group=group,
-            config=config if not isinstance(config, ScalingExperimentConfig) else config.asdict(),
-            tags=self._get_tags()
+            config=config.asdict() if isinstance(config, ScalingExperimentConfig) else config,
+            tags=self._get_tags(),
+            settings=wandb.Settings(force=True)
+        )
+        
+        # Log the actual name assigned to the wandb run, for debugging clarity
+        logger = logging.getLogger(__name__)
+        logger.info(
+            f"Initialized wandb run with name: {self.run.name}"
         )
         
         # Initialize scaling metrics if using ScalingExperimentConfig
