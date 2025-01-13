@@ -153,44 +153,16 @@ def setup_output_dir(
     wandb_run: Optional[Any] = None
 ) -> Path:
     """
-    Setup training output directory structure so that each run
-    ends up with a dedicated subdirectory. For example, if out_dir
-    is 'runs/sweeps/kglgjv0c', then we create:
-        runs/sweeps/kglgjv0c/run_XYZ123
-    and put the checkpoints, config, logs, etc. there.
-
-    If wandb_run is present, we use wandb_run.id as the subfolder name.
-    Otherwise, we fallback to a short timestamp-based name.
+    Setup training output directory structure.
+    Uses config['out_dir'] directly as the run directory path.
     """
-    if wandb_run:
-        sweep_id = wandb_run.sweep_id if wandb_run.sweep else None
-        # e.g. run_id might be "d1a2b3cd"
-        run_id = wandb_run.id or datetime.now().strftime("%Y%m%d_%H%M%S")
-    else:
-        sweep_id = None
-        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    base_dir = Path(config.get('out_dir', 'runs'))
-    # If user or wandb agent has replaced @@SWEEPID@@ etc. in config['out_dir'],
-    # base_dir might already be something like "runs/sweeps/kglgjv0c". We'll still
-    # create a subdirectory for the *individual run*, e.g. "run_XXX".
-    # If the base_dir already ends with "run_something", you might want to skip,
-    # but typically we do it unconditionally for consistent structure.
-
-    # We'll define a short name for the subfolder. If run_id is very long,
-    # you can slice it, e.g. run_id[:8].
-    short_run_id = run_id[:8] if len(run_id) >= 8 else run_id
-
-    # Decide on the final run_dir
-    # e.g. runs/sweeps/<SWEEPID>/run_<short_run_id>
-    run_dir = base_dir / f"run_{short_run_id}"
+    # Simpler approach: just use config['out_dir'] as-is
+    run_dir = Path(config['out_dir'])
 
     if master_process:
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "checkpoints").mkdir(exist_ok=True)
         (run_dir / "logs").mkdir(exist_ok=True)
-
-        # Save config (handle both DictConfig and Python dict)
         save_config(config, run_dir)
 
     return run_dir

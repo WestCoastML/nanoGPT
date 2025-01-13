@@ -17,7 +17,7 @@ metric:
 parameters:
   # Now we can have out_dir reference ${sweep_id} via Hydra interpolation
   out_dir:
-    value: "runs/sweeps/${oc.env:WANDB_SWEEP_ID,'undefined'}"  # Updated for Hydra oc.env syntax
+    value: "runs/sweeps/${oc.env:WANDB_SWEEP_ID,'undefined'}/run_${oc.env:WANDB_RUN_ID,'unknown'}"  # Updated for Hydra oc.env syntax
 
   wandb_log:
     value: true
