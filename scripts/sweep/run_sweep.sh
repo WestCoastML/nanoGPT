@@ -138,11 +138,14 @@ if [ -n "$RESUME_RUN" ]; then
 
     if [ "$RUN_EXISTS" != "True" ]; then
         log "Run ${RUN_ID_BASENAME} not found in WandB. The run has finished. Forking a new run..."
-        FORK_SWEEP_ID="fork_of_${SWEEP_ID}_$(date +%Y%m%d_%H%M%S)"
-        log "Fork sweep ID => $FORK_SWEEP_ID"
+        # Create a new run ID for the fork run
         FORK_RUN_ID="fork_run_${SWEEP_ID}_$(date +%Y%m%d_%H%M%S)"
         unset WANDB_SWEEP_ID
         export WANDB_RUN_ID="$FORK_RUN_ID"
+        # Set the new output directory as a subdirectory of the original sweep folder.
+        NEW_OUT_DIR="runs/sweeps/${SWEEP_ID}/${FORK_RUN_ID}"
+        log "Fork run output directory set to $NEW_OUT_DIR"
+        
         if [ -n "$debug" ]; then
             DEBUG_ARG="+debug=$debug"
         else
@@ -167,7 +170,7 @@ if [ -n "$RESUME_RUN" ]; then
             init_from=resume \
             ++wandb_run_name="forked_${SWEEP_ID}" \
             wandb_log=true \
-            out_dir="runs/sweeps/${FORK_SWEEP_ID}" \
+            out_dir="$NEW_OUT_DIR" \
             +resume_checkpoint="$CHECKPOINT_PATH" \
             "${OVERRIDE_ARGS[@]}" || {
                 error "Failed to fork new run from $RESUME_RUN"
@@ -204,6 +207,10 @@ elif [ -n "$RESUME_SWEEP" ]; then
     # Also define a new run ID, so Hydra's fallback "upl53903" won't appear.
     # We'll incorporate the old sweep ID in the new run ID for clarity.
     FORK_RUN_ID="fork_run_${RESUME_SWEEP}_$(date +%Y%m%d_%H%M%S)"
+    unset WANDB_SWEEP_ID
+    export WANDB_RUN_ID="$FORK_RUN_ID"
+    NEW_OUT_DIR="runs/sweeps/${RESUME_SWEEP}/${FORK_RUN_ID}"
+    log "Fork run output directory set to $NEW_OUT_DIR"
     
     # Validate checkpoint path exists
     CHECKPOINT_PATH="runs/sweeps/${RESUME_SWEEP}/checkpoints/latest.pt"
@@ -221,7 +228,7 @@ elif [ -n "$RESUME_SWEEP" ]; then
         init_from=resume \
         ++wandb_run_name="forked_${RESUME_SWEEP}" \
         wandb_log=true \
-        out_dir="runs/sweeps/${FORK_SWEEP_ID}" \
+        out_dir="$NEW_OUT_DIR" \
         +debug=$debug \
         +resume_checkpoint="runs/sweeps/${RESUME_SWEEP}/checkpoints/latest.pt" \
         +wandb_run_name="forked_${RESUME_SWEEP}" \

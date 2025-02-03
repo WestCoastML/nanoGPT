@@ -571,7 +571,7 @@ class TrainingManager:
                 self.wandb_logger = WandBLogger(
                     config=experiment_config,
                     project=self.cfg.get('wandb_project', 'VSLM'),
-                    entity=self.cfg.get('wandb_entity', 'wcml'),
+                    entity=(self.cfg.get('wandb_entity') or "wcml"),
                     name=self.cfg.get('wandb_run_name', default_name),
                     group=self.cfg.get('wandb_group', None)
                 )
