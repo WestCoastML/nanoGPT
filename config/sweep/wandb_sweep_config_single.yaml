@@ -52,7 +52,7 @@ parameters:
   gradient_accumulation_steps:
     value: 1
   max_iters: 
-    value: 2000
+    value: 3000
 
   # Wandb settings
   wandb_project:

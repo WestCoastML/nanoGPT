@@ -1,6 +1,19 @@
 """
 Utility for continuing training runs with updated parameters.
 Supports both single-GPU and DDP modes.
+
+ USAGE NOTE:
+   - If you want to run this script directly (e.g. `python utils/continue_run.py ...`),
+     you must be in the project root (`nanoGPT/`) and set `PYTHONPATH=.`
+     so Python recognizes `utils/` as a top-level package:
+
+         cd /path/to/nanoGPT
+         PYTHONPATH=. python utils/continue_run.py --run_id <RUN_ID> ...
+
+   - Alternatively, run it as a module:
+
+         cd /path/to/nanoGPT
+         python -m utils.continue_run --run_id <RUN_ID> ...
 """
 
 import os
@@ -15,7 +28,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
-from .training_utils import CheckpointManager, validate_checkpoint_compatibility
+from .training_utils import (
+    # Optionally import if you need these:
+    CheckpointManager,
+    validate_checkpoint_compatibility,
+)
+# If model.py is one directory above `utils/`, you can do either:
+#   from ..model import GPT, GPTConfig
+# or keep an absolute import if your top-level folder is on PYTHONPATH
 from model import GPT, GPTConfig
 
 logging.basicConfig(level=logging.INFO)
@@ -26,12 +46,17 @@ def parse_args():
     parser.add_argument('--run_id', required=True, help='Wandb run ID to continue')
     parser.add_argument('--max-iters', type=int, help='New max iterations')
     parser.add_argument('--learning-rate', type=float, help='New learning rate')
-    parser.add_argument('--config', type=str, help='JSON file with multiple parameter updates')
+    parser.add_argument('--config', type=str, help='JSON string or file with multiple parameter updates')
     parser.add_argument('--gpus', type=str, default='0', 
                        help='Comma-separated GPU IDs for DDP, or single GPU ID')
     parser.add_argument('--ddp', action='store_true', help='Use DDP mode')
     parser.add_argument('--no-wandb', action='store_true', help='Disable wandb logging')
-    parser.add_argument('--checkpoint', type=str, help='Specific checkpoint to load')
+    parser.add_argument('--checkpoint', type=str, required=True,
+                        help="""
+Path to the checkpoint from which to continue (mandatory).
+If this is a directory, we will attempt to load <directory>/latest.pt
+If it is a file, we will load exactly that file.
+""")
     parser.add_argument('--out_dir', type=str, help='Output directory for runs')
     return parser.parse_args()
 
@@ -127,7 +152,8 @@ def create_command(config: Dict[str, Any],
             if k == 'datasets':
                 logger.info(f"Using datasets configuration: {v}")
         else:
-            cmd.append(f("--{k}={v}")
+            # cmd.append(f("--{k}={v}")
+            cmd.append(f"--{k}={v}")
             
     return cmd, env
 
@@ -182,50 +208,151 @@ def run_training(cmd: List[str],
         for sig in [signal.SIGINT, signal.SIGTERM]:
             signal.signal(sig, signal.SIG_DFL)
 
-def load_and_validate_model(run_dir: str, config: Dict[str, Any], device: str) -> Tuple[GPT, int, float]:
-    """Load model from checkpoint with validation"""
-    checkpoint_manager = CheckpointManager(Path(run_dir) / "checkpoints")
-    
+def resolve_checkpoint_path(checkpoint_arg: str) -> str:
+    """
+    If user supplies a directory path for --checkpoint, automatically
+    look for 'latest.pt' in that directory. If user supplies a file path,
+    load that file directly.
+    """
+    import os
+    if os.path.isdir(checkpoint_arg):
+        candidate = os.path.join(checkpoint_arg, 'latest.pt')
+        if not os.path.exists(candidate):
+            raise FileNotFoundError(
+                f"Checkpoint directory '{checkpoint_arg}' does not contain 'latest.pt'."
+            )
+        return candidate
+    else:
+        # If not a directory, assume it's a file
+        if not os.path.isfile(checkpoint_arg):
+            raise FileNotFoundError(
+                f"Checkpoint file '{checkpoint_arg}' not found."
+            )
+        return checkpoint_arg
+
+def load_and_validate_model(run_dir: str,
+                            config: Dict[str, Any],
+                            device: str,
+                            checkpoint_path: str) -> Tuple[GPT, int, float]:
+    """
+    Load the model from the user-specified checkpoint path (or auto-resolved).
+    Bypass the normal fallback to latest/best in the CheckpointManager, so there's no confusion.
+    """
+    import torch
     try:
-        # Initialize model with config
-        model_args = config.get('model_args', {})
-        model = GPT(GPTConfig(**model_args))
-        model.to(device)
-        
-        # Load checkpoint
-        checkpoint = checkpoint_manager.load_checkpoint(map_location=device)
-        
-        # Validate checkpoint compatibility
-        if not validate_checkpoint_compatibility(checkpoint, model, config):
-            raise ValueError("Checkpoint not compatible with current configuration")
-        
-        # Load state
-        model.load_state_dict(checkpoint['state_dict']['model'])
-        iter_num = checkpoint['metadata'].get('iteration', 0)
-        best_val_loss = checkpoint['metadata'].get('best_val_loss', float('inf'))
-        
-        return model, iter_num, best_val_loss
-        
-    except (FileNotFoundError, RuntimeError) as e:
-        logger.error(f"Failed to load checkpoint: {e}")
-        raise
+        checkpoint_data = torch.load(checkpoint_path, map_location=device)
+    except FileNotFoundError as e:
+        raise FileNotFoundError(f"Could not find checkpoint file: {checkpoint_path}") from e
+    except Exception as e:
+        raise RuntimeError(f"Error loading checkpoint from {checkpoint_path}: {e}")
+
+    metadata      = checkpoint_data.get('metadata', {})
+    old_config    = metadata.get('config', {})
+    old_model_args = old_config.get('model_args', {})
+
+    logger.info(
+        f"Loaded checkpoint from {checkpoint_path} with "
+        f"iteration={metadata.get('iteration', 0)} "
+        f"best_val_loss={metadata.get('best_val_loss', float('inf'))}"
+    )
+
+    # 2) Build new_config by merging original checkpoint config with CLI updates
+    new_config = dict(old_config)  # shallow copy from checkpoint
+    for key, val in config.items():
+        if key != "model_args":
+            new_config[key] = val
+
+    # 3) Merge model_args carefully
+    new_model_args = dict(old_model_args)
+    cli_model_args = config.get('model_args', {})
+    for k, v in cli_model_args.items():
+        new_model_args[k] = v
+
+    # If user didn't override layer_dims/n_heads, keep the old
+    if "layer_dims" not in new_model_args and "layer_dims" in old_model_args:
+        new_model_args["layer_dims"] = old_model_args["layer_dims"]
+    if "n_heads" not in new_model_args and "n_heads" in old_model_args:
+        new_model_args["n_heads"] = old_model_args["n_heads"]
+
+    new_config["model_args"] = new_model_args
+
+    # ---------------------------------------------------------------------
+    # Force the new config to use the old block_size, vocab_size, bias, etc.
+    # if we see them in the old config. This ensures shapes match exactly.
+    # You can comment out whichever you do NOT want forced.
+    # (Of course, if you intentionally want to use a different shape, skip this!)
+    # 
+    # For example, if old_config had block_size=256, vocab_size=50257, bias=false:
+    old_block_size = old_config.get('block_size', None)
+    if old_block_size is not None:
+        logger.info(f"Forcing new model block_size to {old_block_size} to match old checkpoint.")
+        new_config["block_size"] = old_block_size
+        new_model_args["block_size"] = old_block_size
+
+    old_bias = old_config.get('bias', None)
+    if old_bias is not None:
+        logger.info(f"Forcing new model bias={old_bias} to match old checkpoint.")
+        new_config["bias"] = old_bias
+        new_model_args["bias"] = old_bias
+
+    old_vocab_size = old_model_args.get('vocab_size', None)
+    if old_vocab_size is not None:
+        logger.info(f"Forcing new model vocab_size to {old_vocab_size} to match old checkpoint.")
+        new_model_args["vocab_size"] = old_vocab_size
+
+    # For shaping the attention bias, also check if old_config had a certain 'n_layer' or something else
+    # but typically the main mismatch is block_size, bias, vocab_size.
+    # ---------------------------------------------------------------------
+
+    # 4) Create the model from the final merged config
+    model = GPT(GPTConfig(**new_config["model_args"]))
+    model.to(device)
+
+    # 5) Load iteration/best_val_loss from checkpoint metadata
+    iter_num = metadata.get("iteration", 0)
+    best_val_loss = metadata.get("best_val_loss", float('inf'))
+
+    # 6) Actually load model state dict
+    orig_sd = checkpoint_data["state_dict"]["model"]
+
+    # --- NEW LOGIC: Remove any `_orig_mod.` or `module.` prefix from checkpoint keys --- #
+    # Torch 2.0's `torch.compile` can store model weights under "_orig_mod."
+    # Also if you used DDP, you might have "module." prefix.
+    # We'll remove both if present:
+    renamed_sd = {}
+    for k, v in orig_sd.items():
+        new_k = k
+        # If there's a "_orig_mod." prefix, remove it
+        if new_k.startswith("_orig_mod."):
+            new_k = new_k[len("_orig_mod."):]
+        # If there's a "module." prefix, remove it
+        if new_k.startswith("module."):
+            new_k = new_k[len("module."):]
+        renamed_sd[new_k] = v
+
+    # Now load the renamed keys into our model
+    model.load_state_dict(renamed_sd)
+    # --- End new logic --- #
+
+    return model, iter_num, best_val_loss
 
 def determine_run_directory(config: Dict[str, Any], out_dir: Optional[str] = None) -> Path:
-    """Determine the run directory based on config and out_dir."""
+    """
+    Decide on a new run directory for continuing. E.g. create 'checkpoints_continued'.
+    """
     if out_dir:
-        # If out_dir is specified, use it as base
         base_dir = Path(out_dir)
     else:
-        # Default to 'runs' directory
         base_dir = Path('runs')
-    
-    # If we have a sweep_id, include it in the path
+
     if 'sweep_id' in config:
         run_dir = base_dir / 'sweeps' / config['sweep_id'] / f"run_{config['run_id']}"
     else:
         run_dir = base_dir / 'single' / f"run_{config['run_id']}"
-    
-    return run_dir
+
+    # Example: append a 'checkpoints_continued' subdir so we don't overwrite old run's 'checkpoints'
+    continued_dir = run_dir / "checkpoints_continued"
+    return continued_dir
 
 def main():
     args = parse_args()
@@ -247,9 +374,14 @@ def main():
     if args.learning_rate:
         config_updates['learning_rate'] = args.learning_rate
     if args.config:
-        with open(args.config) as f:
-            file_updates = json.load(f)
-            config_updates.update(file_updates)
+        try:
+            # Try to parse the config argument as JSON string
+            file_updates = json.loads(args.config)
+        except json.JSONDecodeError:
+            # If it fails, assume it's a file path
+            with open(args.config) as f:
+                file_updates = json.load(f)
+        config_updates.update(file_updates)
             
     config = load_and_validate_config(original_config, config_updates)
     
@@ -258,46 +390,51 @@ def main():
         config['sweep_id'] = original_run.sweep.id
     config['run_id'] = args.run_id
     
-    # Determine run directory using out_dir if specified
-    run_dir = determine_run_directory(config, args.out_dir)
-    
-    # Load model and state
-    device = f"cuda:{args.gpus.split(',')[0]}" if torch.cuda.is_available() else "cpu"
-    model, iter_num, best_val_loss = load_and_validate_model(run_dir, config, device)
-    
-    # Update config with current state
+    # 1) Determine new run_dir => place we want to store new logs, new checkpoints, etc.
+    new_run_dir = determine_run_directory(config, args.out_dir)
+
+    # 2) Resolve checkpoint path from user input (file vs directory => latest.pt)
+    checkpoint_path = resolve_checkpoint_path(args.checkpoint)
+
+    # 3) Decide device
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if torch.cuda.is_available() and "," in args.gpus:
+        device = f"cuda:{args.gpus.split(',')[0]}"
+
+    # 4) Load model & iteration from that checkpoint
+    model, iter_num, best_val_loss = load_and_validate_model(
+        run_dir=new_run_dir.parent,  # If you need parent folder for references
+        config=config,
+        device=device,
+        checkpoint_path=checkpoint_path
+    )
+
+    # 5) Update config with state
     config.update({
         'init_from': 'resume',
         'iter_num': iter_num,
         'best_val_loss': best_val_loss,
         'resume_run_id': args.run_id
     })
-    
-    # Potential fix: if you want the run to see ddp or not, we can do:
+
+    # 6) Possibly set ddp => True if user wants distributed
     if args.ddp:
         config["ddp"] = True
     else:
         config["ddp"] = False
-    # This ensures train.py can see cfg.ddp
 
-    # Create command and environment
-    cmd, env = create_command(config, str(run_dir), args.ddp, args.gpus)
-    
-    # Log command
+    # 7) Build command & environment => we store new artifacts in new_run_dir
+    cmd, env = create_command(config, str(new_run_dir), args.ddp, args.gpus)
+
     logger.info("Executing command: %s", " ".join(cmd))
-    
-    # Run training
-    try:
-        exit_code = run_training(cmd, env, str(run_dir))
-        # If the training process returns 0, consider that success:
-        if exit_code == 0:
-            return 0
-        else:
-            # Otherwise propagate or convert nonzero to 1
-            return 1
-    except Exception as e:
-        logger.error(f"Training failed: {e}")
-        return 1
+
+    # 8) Run training
+    exit_code = run_training(cmd, env, str(new_run_dir))
+    if exit_code == 0:
+        logger.info("Training ended successfully.")
+    else:
+        logger.error(f"Training process exited with code {exit_code}.")
+    return exit_code
 
 if __name__ == '__main__':
     exit(main())

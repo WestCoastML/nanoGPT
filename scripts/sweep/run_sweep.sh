@@ -18,6 +18,8 @@ set -euo pipefail
 set -x
 
 DEBUG_MODE=0
+debug=""
+EXTRA_ARGS=()
 
 # Determine script and project root directories
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
@@ -48,6 +50,7 @@ echo "Starting run_sweep.sh. Logging to $LOG_FILE"
 USE_DDP=0
 NUM_GPUS=1
 RESUME_SWEEP=""
+RESUME_RUN=""
 DEBUG_MODE=0
 
 # Grab timestamp for e.g. 20250109_130516_<SWEEP_ID>
@@ -63,6 +66,10 @@ while [[ $# -gt 0 ]]; do
             NUM_GPUS="$2"
             shift 2
             ;;
+        --resume-run)
+            RESUME_RUN="$2"
+            shift 2
+            ;;
         --resume)
             RESUME_SWEEP="$2"
             shift 2
@@ -71,18 +78,22 @@ while [[ $# -gt 0 ]]; do
             DEBUG_MODE=1
             shift
             ;;
+        --)
+            shift
+            break
+            ;;
         *)
-            echo "Unknown option: $1"
-            exit 1
+            EXTRA_ARGS+=("$1")
+            shift
             ;;
     esac
 done
 
 [[ "$DEBUG_MODE" -eq 1 ]] && set -x
 
-# Possibly pass --debug to Hydra or set +debug=True
+# Possibly pass --debug to Hydra or set debug=True
 if [[ "$DEBUG_MODE" -eq 1 ]]; then
-    export debug=True
+    debug=True
 fi
 
 # Re-define log functions after we parse debug
@@ -95,19 +106,134 @@ debug_log() {
     fi
 }
 
-# Create or resume a sweep
-if [ -n "$RESUME_SWEEP" ]; then
-    echo "[DEBUG] Checking environment in run_sweep.sh before resuming sweep..."
-    echo "[DEBUG] which python => $(which python)"
-    echo "[DEBUG] python executable => $(python -c "import sys; print(sys.executable)")"
-    pip show wandb >/dev/null 2>&1 || echo "[DEBUG] wandb not found in this environment"
-    python -c "import sweeps; print(f'[DEBUG] sweeps version is {sweeps.__version__}')" 2>/dev/null \
-        || echo "[DEBUG] sweeps not found"
-    pip show wandb >/dev/null 2>&1 && \
-        echo "[DEBUG] wandb version is $(pip show wandb | grep Version | awk '{print $2}')" || \
-        echo "[DEBUG] wandb not found"
-    log "Resuming sweep with ID: $RESUME_SWEEP"
-    SWEEP_ID="$RESUME_SWEEP"
+construct_wandb_name() {
+    local sweep_id=$1
+    local run_id=$2
+    local prefix=$3
+    
+    if [ -n "$prefix" ]; then
+        echo "${prefix}_${sweep_id}_${run_id}"
+    else
+        echo "${sweep_id}_${run_id}"
+    fi
+}
+
+# Resume run or sweep setup
+if [ -n "$RESUME_RUN" ]; then
+    # Remove any extraneous quotes
+    RESUME_RUN=$(echo "$RESUME_RUN" | tr -d '"')
+    log "Requested --resume-run for a finished run: $RESUME_RUN"
+    CHECKPOINT_PATH="runs/sweeps/${RESUME_RUN}/checkpoints/latest.pt"
+    if [ ! -f "$CHECKPOINT_PATH" ]; then
+        error "Checkpoint not found at $CHECKPOINT_PATH"
+        exit 1
+    fi
+
+    # Extract the bare run id and the sweep id from RESUME_RUN (format: SWEEP_ID/RUN_ID)
+    RUN_ID_BASENAME=$(basename "$RESUME_RUN")
+    SWEEP_ID=$(echo "$RESUME_RUN" | cut -d'/' -f1)
+
+    # Check if the run exists in WandB using the bare run id.
+    RUN_EXISTS=$(python -c "import wandb; api=wandb.Api(); print(api.run('wcml/VSLM/${RUN_ID_BASENAME}') is not None)" 2>/dev/null || echo "False")
+
+    if [ "$RUN_EXISTS" != "True" ]; then
+        log "Run ${RUN_ID_BASENAME} not found in WandB. The run has finished. Forking a new run..."
+        FORK_SWEEP_ID="fork_of_${SWEEP_ID}_$(date +%Y%m%d_%H%M%S)"
+        log "Fork sweep ID => $FORK_SWEEP_ID"
+        FORK_RUN_ID="fork_run_${SWEEP_ID}_$(date +%Y%m%d_%H%M%S)"
+        unset WANDB_SWEEP_ID
+        export WANDB_RUN_ID="$FORK_RUN_ID"
+        if [ -n "$debug" ]; then
+            DEBUG_ARG="+debug=$debug"
+        else
+            DEBUG_ARG=""
+        fi
+
+        # Convert EXTRA_ARGS to Hydra override format: strip leading "--" and convert dashes to underscores.
+        OVERRIDE_ARGS=()
+        for arg in "${EXTRA_ARGS[@]}"; do
+            if [[ $arg == --* && $arg == *=* ]]; then
+                key=${arg%%=*}      # key with leading dashes
+                key=${key:2}        # remove the leading --
+                value=${arg#*=}     # the value part
+                key=$(echo "$key" | tr '-' '_')
+                OVERRIDE_ARGS+=( "$key=$value" )
+            else
+                OVERRIDE_ARGS+=( "$arg" )
+            fi
+        done
+
+        python "$PROJECT_ROOT/train.py" \
+            init_from=resume \
+            ++wandb_run_name="forked_${SWEEP_ID}" \
+            wandb_log=true \
+            out_dir="runs/sweeps/${FORK_SWEEP_ID}" \
+            +resume_checkpoint="$CHECKPOINT_PATH" \
+            "${OVERRIDE_ARGS[@]}" || {
+                error "Failed to fork new run from $RESUME_RUN"
+                exit 1
+            }
+        log "Fork run launched. Exiting script now..."
+        exit 0
+    else
+        export WANDB_RUN_ID="$RUN_ID_BASENAME"
+        if [ -n "$debug" ]; then
+            DEBUG_ARG="+debug=$debug"
+        else
+            DEBUG_ARG=""
+        fi
+        python -m utils.continue_run --run_id "$RUN_ID_BASENAME" --checkpoint "$CHECKPOINT_PATH" ${DEBUG_ARG} "${EXTRA_ARGS[@]}" || {
+            error "Failed to resume run $RESUME_RUN"
+            exit 1
+        }
+        log "Resumed run launched. Exiting script now..."
+        exit 0
+    fi
+elif [ -n "$RESUME_SWEEP" ]; then
+    log "Requested --resume for a previously completed sweep: $RESUME_SWEEP"
+    log "In Weights & Biases, once a sweep is completed, you cannot attach new runs to that exact ID."
+    log "We will fork a new run that loads from the old sweeps checkpoint instead."
+
+    FORK_SWEEP_ID="fork_of_${RESUME_SWEEP}_$(date +%Y%m%d_%H%M%S)"
+    log "Fork sweep ID => $FORK_SWEEP_ID"
+
+    # Unset old sweep ID so we do not call wandb agent on the finished sweep
+    unset WANDB_SWEEP_ID
+    SWEEP_ID="$FORK_SWEEP_ID"
+
+    # Also define a new run ID, so Hydra's fallback "upl53903" won't appear.
+    # We'll incorporate the old sweep ID in the new run ID for clarity.
+    FORK_RUN_ID="fork_run_${RESUME_SWEEP}_$(date +%Y%m%d_%H%M%S)"
+    
+    # Validate checkpoint path exists
+    CHECKPOINT_PATH="runs/sweeps/${RESUME_SWEEP}/checkpoints/latest.pt"
+    if [ ! -f "$CHECKPOINT_PATH" ]; then
+        error "Checkpoint not found at $CHECKPOINT_PATH"
+        exit 1
+    fi
+    
+    unset WANDB_SWEEP_ID      # remove the environment var so W&B doesn't try to attach to an old sweep
+    export WANDB_RUN_ID="$FORK_RUN_ID"
+
+    # Example: directly run your training script in resume mode
+    # Note: Using ++ for wandb_run_name to override existing config
+    python "$PROJECT_ROOT/train.py" \
+        init_from=resume \
+        ++wandb_run_name="forked_${RESUME_SWEEP}" \
+        wandb_log=true \
+        out_dir="runs/sweeps/${FORK_SWEEP_ID}" \
+        +debug=$debug \
+        +resume_checkpoint="runs/sweeps/${RESUME_SWEEP}/checkpoints/latest.pt" \
+        +wandb_run_name="forked_${RESUME_SWEEP}" \
+        "${EXTRA_ARGS[@]}" \
+        || {
+            local exit_code=$?
+            error "Failed to fork new run from $RESUME_SWEEP"
+            exit 1
+        }
+
+    log "Fork run launched. Exiting script now..."
+    exit 0
 else
     # Create a new sweep
     config_file="config/sweep/wandb_sweep_config_$([ $USE_DDP -eq 1 ] && echo ddp || echo single).yaml"
@@ -116,14 +242,19 @@ else
     echo "[DEBUG] which python => $(which python)"
     echo "[DEBUG] python executable => $(python -c "import sys; print(sys.executable)")"
     pip show wandb >/dev/null 2>&1 || echo "[DEBUG] wandb not found in this environment"
-    python -c "import sweeps; print(f'[DEBUG] sweeps version is {sweeps.__version__}')" 2>/dev/null \
-        || echo "[DEBUG] sweeps not found"
-    pip show wandb >/dev/null 2>&1 && \
-        echo "[DEBUG] wandb version is $(pip show wandb | grep Version | awk '{print $2}')" || \
+    python -c "import sweeps; print(f'[DEBUG] sweeps version is {sweeps.__version__}')" 2>/dev/null || echo "[DEBUG] sweeps not found"
+    
+    if pip show wandb >/dev/null 2>&1; then
+        echo "[DEBUG] wandb version is $(pip show wandb | grep Version | awk '{print $2}')"
+    else
         echo "[DEBUG] wandb not found"
-    SWEEP_OUTPUT="$(wandb sweep "$config_file" 2>&1)"
-    log "Sweep output: $SWEEP_OUTPUT"
+    fi
 
+    SWEEP_OUTPUT="$(wandb sweep "$config_file")" || {
+        error "Failed to create sweep"
+        exit 1
+    }
+    log "Sweep output: $SWEEP_OUTPUT"
     # Extract entire line containing 'wandb agent ...'
     FULL_SWEEP="$(echo "$SWEEP_OUTPUT" | grep -o 'wandb agent.*')"
     # Get the third space-delimited token, e.g. "wcml/VSLM/123abc"

@@ -452,63 +452,77 @@ class TrainingManager:
 
         return run_dir, data_dir, float('inf')  # Initial best val loss
 
-    def setup_model(self, 
-                device: str,
-                ddp: bool,
-                ddp_local_rank: int,
-                ddp_world_size: int) -> Tuple[torch.nn.Module, torch.optim.Optimizer]:
+    def setup_model(self,
+                    device: str,
+                    ddp: bool,
+                    ddp_local_rank: int,
+                    ddp_world_size: int) -> Tuple[torch.nn.Module, torch.optim.Optimizer]:
         """Setup model and optimizer with proper parameter count logging"""
         
         # Setup model dimensions
         layer_dims, n_heads, use_unet = setup_model_dimensions(self.cfg)
-        # Hydra config is often in "struct" mode; to add or modify keys, use open_dict
+
+        # 1) Instruct Hydra to allow editing of self.cfg
+        # so we can add new keys (like 'model_args') without KeyError
         with open_dict(self.cfg):
-            self.cfg.layer_dims = layer_dims
-            self.cfg.n_heads = n_heads
-            self.cfg.use_unet = use_unet
-        
-        model_args = {
-            'layer_dims': layer_dims,
-            'n_heads': n_heads,
-            'block_size': self.cfg.block_size,
-            'bias': self.cfg.bias,
-            'vocab_size': self.dataset_handler.vocab_size if self.dataset_handler else 50304,
-            'dropout': self.cfg.dropout,
-            'n_layer': self.cfg.n_layer,
-            'model_architecture': self.cfg.model_architecture,
-            'use_unet': use_unet
-        }
-        
-        # Initialize model
-        if self.cfg.init_from.startswith('gpt2'):
+            if "model_args" not in self.cfg or self.cfg.model_args is None:
+                self.cfg.model_args = {}
+
+        # 2) Also open_dict on self.cfg.model_args itself
+        #    so we can add e.g. 'n_layer', 'layer_dims', 'n_heads' safely
+        with open_dict(self.cfg.model_args):
+            # Guarantee n_layer is stored in model_args (not top-level)
+            self.cfg.model_args.n_layer = self.cfg.n_layer
+            self.cfg.model_args.layer_dims = layer_dims
+            self.cfg.model_args.n_heads = n_heads
+            self.cfg.model_args.use_unet = use_unet
+
+        # 3) Now build a plain Python dict from self.cfg.model_args
+        #    so GPTConfig(...) doesn't break on OmegaConf strict mode
+        from omegaconf import OmegaConf
+        model_args = OmegaConf.to_container(self.cfg.model_args, resolve=True)
+
+        # 4) Add any extra top-level fields to model_args
+        model_args["block_size"]  = self.cfg.block_size
+        model_args["bias"]        = self.cfg.bias
+        model_args["dropout"]     = self.cfg.dropout
+        model_args["model_architecture"] = self.cfg.model_architecture
+
+        # If we have a dataset_handler (already created in __init__),
+        # pass vocab_size from that:
+        model_args["vocab_size"] = (
+            self.dataset_handler.vocab_size if self.dataset_handler else 50304
+        )
+
+        # 5) Actually create the GPT or GPT-from-pretrained
+        if isinstance(self.cfg.init_from, str) and self.cfg.init_from.startswith('gpt2'):
             logger.info(f"Initializing from OpenAI GPT-2 weights: {self.cfg.init_from}")
             override_args = dict(dropout=self.cfg.dropout)
             model = GPT.from_pretrained(self.cfg.init_from, override_args)
         else:
-            model = GPT(GPTConfig(**model_args))
-            
-        # Calculate and log parameter count
+            # We have final model_args as a Python dict
+            gpt_conf = GPTConfig(**model_args)
+            model = GPT(gpt_conf)
+
+        # 6) Log number of params, etc. (rest of your existing code)
         num_params = sum(p.numel() for p in model.parameters())
         if self.cfg.get('print_params_only', False):
-            logger.info(f"Number of parameters: {num_params/1e6:.2fM}")
-            # Log to wandb before exiting if wandb is enabled
-            if self.wandb_logger and self.master_process:
+            logger.info(f"Number of parameters: {num_params/1e6:.2f}M")
+            if self.wandb_logger:
                 wandb.run.summary["number_of_parameters"] = num_params
             sys.exit(0)
-        
-        # Log parameter count for normal training runs
+
         if not ddp or ddp_local_rank == 0:
             logger.info(f"Number of parameters: {num_params/1e6:.2f}M")
             if self.wandb_logger:
                 wandb.run.summary["number_of_parameters"] = num_params
-                
+
+        # Continue with your DDP wrapping, optimizer creation, etc.
         model.to(device)
-        
+
         if ddp:
             model = DDP(model, device_ids=[ddp_local_rank])
-            # Verify DDP consistency
-            self.verify_ddp_consistency(model, ddp_world_size)
-            
+
         optimizer = model.configure_optimizers(
             weight_decay=self.cfg.weight_decay,
             learning_rate=self.cfg.learning_rate,
@@ -535,10 +549,14 @@ class TrainingManager:
             
             # Create and initialize the logger
             if self.cfg.datasets:
+                # IMPORTANT CHANGE: read all final arch fields from self.cfg.model_args
+                # so that layer_dims, n_heads, etc. are never None
+                ma = self.cfg.model_args
                 experiment_config = ScalingExperimentConfig(
-                    n_layer=self.cfg.n_layer,
-                    n_heads=self.cfg.n_heads,
-                    layer_dims=self.cfg.layer_dims,
+                    # Use the final fields from model_args:
+                    n_layer=ma["n_layer"],               # or self.cfg.n_layer if you prefer
+                    n_heads=ma["n_heads"],               # was self.cfg.n_heads (possibly None)
+                    layer_dims=ma["layer_dims"],         # was self.cfg.layer_dims (possibly None)
                     max_tokens=self.cfg.max_iters * self.tokens_per_iter,
                     batch_size=self.cfg.batch_size,
                     learning_rate=self.cfg.learning_rate,
@@ -726,8 +744,9 @@ class TrainingManager:
                 self.world_size
             )
             
-            # Load state if resuming
-            if self.cfg.init_from == 'resume':
+            # Load state if resuming from a checkpoint (either via init_from or if a checkpoint path is provided)
+            checkpoint_to_load = self.cfg.get("resume_checkpoint", None)
+            if self.cfg.init_from == 'resume' or checkpoint_to_load:
                 (
                     self.model,
                     self.optimizer,
@@ -739,11 +758,12 @@ class TrainingManager:
                     optimizer=self.optimizer,
                     device=self.device,
                     config=self.cfg,
-                    ddp=self.ddp
+                    ddp=self.ddp,
+                    checkpoint_path=checkpoint_to_load
                 )
             else:
                 self.iter_num = 0
-                
+
             # Initialize training state
             self.scaler = torch.cuda.amp.GradScaler(
                 # Allowed in PyTorch 2.5.0
@@ -758,7 +778,7 @@ class TrainingManager:
             self.X, self.Y = self.get_batch('train')
             
             # Training loop state
-            t0 = time.time()
+            self.t0 = time.time()
             local_iter_num = 0
             running_mfu = -1.0
             
@@ -773,7 +793,15 @@ class TrainingManager:
                     self.model,
                     self.optimizer, self.cfg, 0, float('inf'), self.best_val_loss, is_best=False)
 
+            # Training loop state: ensure t0 is defined.
+            if not hasattr(self, 't0') or self.t0 is None:
+                self.t0 = time.time()
+            t0 = self.t0
             while not self.exit_flag:
+                t1 = time.time()
+                dt = t1 - t0
+                t0 = t1
+                self.t0 = t0
                 # Learning rate update
                 lr = self.get_lr(self.iter_num)
                 for param_group in self.optimizer.param_groups:

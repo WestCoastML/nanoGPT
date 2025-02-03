@@ -220,11 +220,15 @@ def load_training_state(checkpoint_manager: CheckpointManager,
                        optimizer: torch.optim.Optimizer,
                        device: str,
                        config: Dict[str, Any],
-                       ddp: bool = False) -> Tuple[torch.nn.Module, torch.optim.Optimizer, int, float]:
+                       ddp: bool = False,
+                       checkpoint_path=None) -> Tuple[torch.nn.Module, torch.optim.Optimizer, int, float]:
     """Load complete training state with config validation"""
     
     try:
-        checkpoint = checkpoint_manager.load_checkpoint(map_location=device)
+        if checkpoint_path is not None:
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+        else:
+            checkpoint = checkpoint_manager.load_checkpoint(map_location=device)
         
         # Validate config compatibility
         if not validate_config_compatibility(
