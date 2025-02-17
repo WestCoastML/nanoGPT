@@ -138,45 +138,45 @@ if [ -n "$RESUME_RUN" ]; then
 
     if [ "$RUN_EXISTS" != "True" ]; then
         log "Run ${RUN_ID_BASENAME} not found in WandB. The run has finished. Forking a new run..."
-        # Create a new run ID for the fork run
+
+        # Extract configuration parameters from Hydra (config/hydra/train.yaml)
+        MODEL_ARCHITECTURE=$(python -c "from omegaconf import OmegaConf; cfg=OmegaConf.load('config/hydra/train.yaml'); print(cfg.model_architecture)")
+        LEARNING_RATE=$(python -c "from omegaconf import OmegaConf; cfg=OmegaConf.load('config/hydra/train.yaml'); print(cfg.learning_rate)")
+        BATCH_SIZE=$(python -c "from omegaconf import OmegaConf; cfg=OmegaConf.load('config/hydra/train.yaml'); print(cfg.batch_size)")
+        BASE_DIM=$(python -c "from omegaconf import OmegaConf; cfg=OmegaConf.load('config/hydra/train.yaml'); print(cfg.base_dim)")
+
         FORK_RUN_ID="fork_run_${SWEEP_ID}_$(date +%Y%m%d_%H%M%S)"
         unset WANDB_SWEEP_ID
         export WANDB_RUN_ID="$FORK_RUN_ID"
-        # Set the new output directory as a subdirectory of the original sweep folder.
         NEW_OUT_DIR="runs/sweeps/${SWEEP_ID}/${FORK_RUN_ID}"
         log "Fork run output directory set to $NEW_OUT_DIR"
-        
+
         if [ -n "$debug" ]; then
             DEBUG_ARG="+debug=$debug"
         else
             DEBUG_ARG=""
         fi
 
-        # Convert EXTRA_ARGS to Hydra override format: strip leading "--" and convert dashes to underscores.
-        OVERRIDE_ARGS=()
+        # Convert EXTRA_ARGS from '--key=value' to Hydra override format (key=value)
+        converted_args=()
         for arg in "${EXTRA_ARGS[@]}"; do
-            if [[ $arg == --* && $arg == *=* ]]; then
-                key=${arg%%=*}      # key with leading dashes
-                key=${key:2}        # remove the leading --
-                value=${arg#*=}     # the value part
-                key=$(echo "$key" | tr '-' '_')
-                OVERRIDE_ARGS+=( "$key=$value" )
-            else
-                OVERRIDE_ARGS+=( "$arg" )
-            fi
+          if [[ $arg == --* ]]; then
+             converted_args+=( "${arg:2}" )
+          else
+             converted_args+=( "$arg" )
+          fi
         done
 
         python "$PROJECT_ROOT/train.py" \
             init_from=resume \
-            ++wandb_run_name="forked_${SWEEP_ID}" \
+            wandb_run_name="'sweepid=${SWEEP_ID}_runid=${RUN_ID_BASENAME}_model=${MODEL_ARCHITECTURE}_lr=${LEARNING_RATE}_bs=${BATCH_SIZE}_dim=${BASE_DIM}'" \
             wandb_log=true \
             out_dir="$NEW_OUT_DIR" \
             +resume_checkpoint="$CHECKPOINT_PATH" \
-            "${OVERRIDE_ARGS[@]}" || {
+            "${converted_args[@]}" || {
                 error "Failed to fork new run from $RESUME_RUN"
                 exit 1
             }
-        log "Fork run launched. Exiting script now..."
         exit 0
     else
         export WANDB_RUN_ID="$RUN_ID_BASENAME"
@@ -196,6 +196,12 @@ elif [ -n "$RESUME_SWEEP" ]; then
     log "Requested --resume for a previously completed sweep: $RESUME_SWEEP"
     log "In Weights & Biases, once a sweep is completed, you cannot attach new runs to that exact ID."
     log "We will fork a new run that loads from the old sweeps checkpoint instead."
+
+    # Extract configuration parameters from Hydra
+    MODEL_ARCHITECTURE=$(python -c "from omegaconf import OmegaConf; cfg=OmegaConf.load('config/hydra/train.yaml'); print(cfg.model_architecture)")
+    LEARNING_RATE=$(python -c "from omegaconf import OmegaConf; cfg=OmegaConf.load('config/hydra/train.yaml'); print(cfg.learning_rate)")
+    BATCH_SIZE=$(python -c "from omegaconf import OmegaConf; cfg=OmegaConf.load('config/hydra/train.yaml'); print(cfg.batch_size)")
+    BASE_DIM=$(python -c "from omegaconf import OmegaConf; cfg=OmegaConf.load('config/hydra/train.yaml'); print(cfg.base_dim)")
 
     FORK_SWEEP_ID="fork_of_${RESUME_SWEEP}_$(date +%Y%m%d_%H%M%S)"
     log "Fork sweep ID => $FORK_SWEEP_ID"
@@ -226,12 +232,11 @@ elif [ -n "$RESUME_SWEEP" ]; then
     # Note: Using ++ for wandb_run_name to override existing config
     python "$PROJECT_ROOT/train.py" \
         init_from=resume \
-        ++wandb_run_name="forked_${RESUME_SWEEP}" \
+        wandb_run_name="'sweepid=${RESUME_SWEEP}_runid=${FORK_RUN_ID}_model=${MODEL_ARCHITECTURE}_lr=${LEARNING_RATE}_bs=${BATCH_SIZE}_dim=${BASE_DIM}'" \
         wandb_log=true \
         out_dir="$NEW_OUT_DIR" \
         +debug=$debug \
         +resume_checkpoint="runs/sweeps/${RESUME_SWEEP}/checkpoints/latest.pt" \
-        +wandb_run_name="forked_${RESUME_SWEEP}" \
         "${EXTRA_ARGS[@]}" \
         || {
             local exit_code=$?

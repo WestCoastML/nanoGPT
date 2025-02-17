@@ -761,6 +761,19 @@ class TrainingManager:
                     ddp=self.ddp,
                     checkpoint_path=checkpoint_to_load
                 )
+                # Abort if the new max_iters is smaller than or equal to the iteration already completed.
+                if self.iter_num >= self.cfg.max_iters:
+                    logger.error(f"New max_iters ({self.cfg.max_iters}) is smaller than or equal to the iteration already completed ({self.iter_num}). Aborting run.")
+                    sys.exit(1)
+                # Set wandb run step to the last iteration loaded from the checkpoint
+                try:
+                    import wandb
+                    if wandb.run is not None:
+                        # Instead of setting the read-only wandb.run.step, update the run summary.
+                        wandb.run.summary["step"] = self.iter_num
+                        logger.info(f"Updated wandb run summary step to {self.iter_num}")
+                except Exception as e:
+                    logger.warning(f"Could not update wandb run summary step: {e}")
             else:
                 self.iter_num = 0
 
