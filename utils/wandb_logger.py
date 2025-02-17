@@ -113,9 +113,9 @@ class WandBLogger:
         else:
             return None
 
-    def log_metrics(self, metrics: Dict[str, Any]):
+    def log_metrics(self, metrics: Dict[str, Any], step: Optional[int] = None):
         """Generic method to log any metrics through wandb"""
-        wandb.log(metrics)
+        wandb.log(metrics, step=step)
 
     def log_memory_per_gpu(self):
         """Log memory statistics for each GPU"""
@@ -195,16 +195,19 @@ class WandBLogger:
         }
         return stats
 
-    def log_training_step(self, iter_num: int, metrics: Dict[str, float]):
+    def log_training_step(self, step: int, metrics: Dict[str, float]):
         """Log training metrics for each step"""
         # Basic metrics
         log_dict = {
-            "iter": iter_num,
+            "iter": step,
             "train/loss": metrics.get('loss'),
             "learning_rate": metrics.get('lr'),
             "mfu": metrics.get('mfu', 0) * 100,  # Model flops utilization
         }
-        
+
+        # 2) Actually pass the step in wandb.log(...) so W&B uses that iteration.
+        step_for_wandb = metrics.get('step_override', step)
+
         # Add scaling-specific metrics if using ScalingExperimentConfig
         if isinstance(self.config, ScalingExperimentConfig):
             self.train_tokens += metrics.get('batch_tokens', 0)
@@ -219,10 +222,10 @@ class WandBLogger:
         log_dict.update(self.log_gpu_stats())
         
         # Add system stats every 10 iterations
-        if iter_num % 10 == 0:
+        if step % 10 == 0:
             log_dict.update(self.log_system_stats())
         
-        self.log_metrics(log_dict)
+        self.log_metrics(log_dict, step=step_for_wandb)
 
     def log_evaluation(self, iter_num: int, train_loss: float, val_loss: float, compute: float):
         """Log evaluation metrics"""

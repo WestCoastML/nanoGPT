@@ -915,7 +915,18 @@ class TrainingManager:
                             dt
                         )
                         running_mfu = mfu if running_mfu < 0 else 0.9 * running_mfu + 0.1 * mfu
+                    else:
+                        mfu = running_mfu  # Use the last known value of running_mfu
                     
+                    # Instead of logging self.iter_num directly,
+                    # compute a "display_step" that increments by 1 each time we log.
+                    # For example, if log_interval=200 and iter_num=2000, display_step=10.
+                    # This ensures the chart picks up near 26 instead of 2000.
+                    if self.cfg.log_interval > 0:
+                        display_step = self.iter_num // self.cfg.log_interval
+                    else:
+                        display_step = self.iter_num  # fallback if log_interval=0
+
                     logger.info(
                         f"iter {self.iter_num}: loss {lossf:.4f}, "
                         f"time {dt*1000:.2f}ms, "
@@ -924,11 +935,11 @@ class TrainingManager:
                     
                     if self.wandb_logger:
                         self.wandb_logger.log_training_step(
-                            self.iter_num,
+                            display_step,
                             {
                                 'loss': lossf,
                                 'lr': lr,
-                                'mfu': running_mfu,
+                                'mfu': mfu if running_mfu < 0 else running_mfu,
                                 'iter_time_ms': dt * 1000,
                             }
                         )
