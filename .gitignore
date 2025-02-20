@@ -25,3 +25,4 @@ out_tinystories/
 sweep_*.log
 outputs/
 runs/
+out/
