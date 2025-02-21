@@ -262,7 +262,7 @@ else
         echo "[DEBUG] wandb not found"
     fi
 
-    SWEEP_OUTPUT="$(wandb sweep "$config_file")" || {
+    SWEEP_OUTPUT="$(wandb sweep "$config_file" 2>&1)" || {
         error "Failed to create sweep"
         exit 1
     }
